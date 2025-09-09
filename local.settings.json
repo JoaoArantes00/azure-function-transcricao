@@ -1,0 +1,25 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+
+    "STORAGE_ACCOUNT_NAME": "storageatadev",
+    "STORAGE_CONTAINER_INPUT": "input-audio",
+    "STORAGE_CONTAINER_TRANSCRIPTS": "transcripts",
+    "STORAGE_CONTAINER_ATAS": "atas",
+
+    "SPEECH_KEY": "SPEECH_KEY",
+    "SPEECH_REGION": "brazilsouth",
+    "SPEECH_ENDPOINT": "https://brazilsouth.api.cognitive.microsoft.com/",
+
+    "AZURE_OPENAI_ENDPOINT": "OPENAI_ENDPOINT",         
+    "AZURE_OPENAI_KEY": "OPENAI_KEY",
+    "AZURE_OPENAI_DEPLOYMENT": "transcricao-ata-gpt4o",
+                     
+
+
+    "LOG_LEVEL": "Information"
+  }
+}
