@@ -6,24 +6,17 @@ import traceback
 from datetime import datetime
 from urllib.parse import urlparse
 import requests
-import azure.cognitiveservices.speech as speechsdk
-from openai import AzureOpenAI
-from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient, ContentSettings
-import time
-import threading
-import unicodedata
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Função com todas as importações executando')
+    logging.info('Testando importações básicas')
     
     try:
         if req.params.get("ping") == "1":
             return func.HttpResponse(
                 json.dumps({
                     "status": "success", 
-                    "message": "Todas as importações funcionando",
-                    "imports_ok": True
+                    "message": "Importações básicas OK",
+                    "tested": ["os", "traceback", "datetime", "urllib", "requests"]
                 }),
                 mimetype="application/json",
                 status_code=200
