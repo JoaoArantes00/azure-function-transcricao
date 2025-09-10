@@ -8,17 +8,18 @@ from urllib.parse import urlparse
 import requests
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
+from openai import AzureOpenAI
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Testando azure.storage.blob')
+    logging.info('Testando OpenAI')
     
     try:
         if req.params.get("ping") == "1":
             return func.HttpResponse(
                 json.dumps({
                     "status": "success", 
-                    "message": "Azure Storage OK",
-                    "tested": ["basic_imports", "azure.identity", "azure.storage.blob"]
+                    "message": "OpenAI OK",
+                    "tested": ["basic_imports", "azure.identity", "azure.storage.blob", "openai"]
                 }),
                 mimetype="application/json",
                 status_code=200
