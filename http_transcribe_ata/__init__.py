@@ -311,274 +311,51 @@ def _upload_to_storage(container: str, blob_name: str, content, content_type: st
         raise RuntimeError(f"Erro no upload: {str(e)}")
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    """Função principal para transcrição de áudio e geração de ATA com timestamps e correção UTF-8"""
-    
-    # Configurar logging
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
+    """Função principal simplificada para debug"""
     
     try:
-        # Verificar se é ping
+        logging.info("=== FUNÇÃO INICIADA ===")
+        
+        # Teste básico de ping primeiro
         if req.params.get("ping") == "1":
+            logging.info("Ping detectado")
             return func.HttpResponse(
                 json.dumps({
                     "ok": True, 
                     "status": "pong", 
-                    "marker": MARKER,
-                    "message": "Serviço de transcrição com timestamps e correção UTF-8 funcionando!",
-                    "features": [
-                        "audio_transcription", 
-                        "timestamp_tracking", 
-                        "utf8_normalization",
-                        "ata_generation", 
-                        "azure_storage"
-                    ]
-                }, ensure_ascii=False),
-                mimetype="application/json; charset=utf-8",
+                    "marker": "DEBUG_VERSION",
+                    "message": "Versão de debug funcionando!"
+                }),
+                mimetype="application/json",
                 status_code=200
             )
-
-        # Verificar variáveis de ambiente necessárias
-        required_vars = [
-            "SPEECH_KEY", "SPEECH_REGION",
-            "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_KEY", "AZURE_OPENAI_DEPLOYMENT",
-            "STORAGE_ACCOUNT_NAME", "STORAGE_CONTAINER_INPUT", 
-            "STORAGE_CONTAINER_TRANSCRIPTS", "STORAGE_CONTAINER_ATAS"
-        ]
         
-        env_ok, env_error = _require_env(required_vars)
-        if not env_ok:
+        logging.info("Verificando variáveis de ambiente...")
+        
+        # Verificação simples de variáveis
+        required_vars = ["SPEECH_KEY", "SPEECH_REGION", "AZURE_OPENAI_KEY"]
+        missing = [k for k in required_vars if not os.getenv(k)]
+        
+        if missing:
             return func.HttpResponse(
-                json.dumps({"ok": False, "error": env_error}, ensure_ascii=False),
-                mimetype="application/json; charset=utf-8",
+                json.dumps({"error": f"Variáveis faltando: {missing}"}),
+                mimetype="application/json",
                 status_code=500
             )
-
-        # Processar requisição
-        content_type = (req.headers.get("content-type") or "").lower()
-        audio_bytes = None
-        audio_filename = None
-
-        if content_type.startswith("application/json"):
-            # Modo JSON: espera URL do áudio
-            try:
-                body = req.get_json()
-                if not body:
-                    return func.HttpResponse(
-                        json.dumps({
-                            "ok": False, 
-                            "error": "JSON vazio. Envie {'audio_url': 'https://exemplo.com/audio.wav'}"
-                        }, ensure_ascii=False),
-                        mimetype="application/json; charset=utf-8",
-                        status_code=400
-                    )
-            except Exception as e:
-                return func.HttpResponse(
-                    json.dumps({
-                        "ok": False, 
-                        "error": f"JSON inválido: {str(e)}"
-                    }, ensure_ascii=False),
-                    mimetype="application/json; charset=utf-8",
-                    status_code=400
-                )
-            
-            audio_url = body.get("audio_url")
-            if not audio_url:
-                return func.HttpResponse(
-                    json.dumps({
-                        "ok": False, 
-                        "error": "Campo 'audio_url' é obrigatório"
-                    }, ensure_ascii=False),
-                    mimetype="application/json; charset=utf-8",
-                    status_code=400
-                )
-            
-            # Download do áudio
-            try:
-                audio_bytes = _download_to_bytes(audio_url)
-                audio_filename = os.path.basename(urlparse(audio_url).path) or "audio.wav"
-                logger.info(f"Áudio baixado: {len(audio_bytes)} bytes, nome: {audio_filename}")
-            except Exception as e:
-                return func.HttpResponse(
-                    json.dumps({
-                        "ok": False, 
-                        "error": f"Erro ao baixar áudio: {str(e)}"
-                    }, ensure_ascii=False),
-                    mimetype="application/json; charset=utf-8",
-                    status_code=400
-                )
-
-        elif content_type.startswith("audio/") or content_type.startswith("application/octet-stream"):
-            # Modo binário: áudio enviado diretamente
-            audio_bytes = req.get_body()
-            if not audio_bytes:
-                return func.HttpResponse(
-                    json.dumps({
-                        "ok": False, 
-                        "error": "Corpo da requisição vazio"
-                    }, ensure_ascii=False),
-                    mimetype="application/json; charset=utf-8",
-                    status_code=400
-                )
-            audio_filename = "audio_upload.wav"
-            logger.info(f"Áudio recebido: {len(audio_bytes)} bytes")
-
-        else:
-            return func.HttpResponse(
-                json.dumps({
-                    "ok": False, 
-                    "error": "Content-Type não suportado. Use 'application/json' com audio_url ou envie áudio binário."
-                }, ensure_ascii=False),
-                mimetype="application/json; charset=utf-8",
-                status_code=400
-            )
-
-        # Salvar áudio original (opcional)
-        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        base_name = os.path.splitext(audio_filename)[0]
         
-        try:
-            original_audio_url = _upload_to_storage(
-                container=os.getenv("STORAGE_CONTAINER_INPUT"),
-                blob_name=f"{base_name}-{timestamp}.wav",
-                content=audio_bytes,
-                content_type="audio/wav"
-            )
-            logger.info(f"Áudio original salvo: {original_audio_url}")
-        except Exception as e:
-            logger.warning(f"Erro ao salvar áudio original: {e}")
-            original_audio_url = None
-
-        # Transcrever áudio com timestamps e correção UTF-8
-        try:
-            transcription_result = _speech_transcribe_from_bytes(audio_bytes)
-            transcript_text = transcription_result.get("text", "")
-            transcription_reason = transcription_result.get("reason", "")
-            segments = transcription_result.get("segments", [])
-            segment_count = transcription_result.get("segment_count", 0)
-            
-            logger.info(f"Transcrição concluída: {len(transcript_text)} caracteres, {segment_count} segmentos, reason: {transcription_reason}")
-            
-            if not transcript_text.strip():
-                return func.HttpResponse(
-                    json.dumps({
-                        "ok": False,
-                        "error": "Nenhum texto foi transcrito do áudio",
-                        "reason": transcription_reason
-                    }, ensure_ascii=False),
-                    mimetype="application/json; charset=utf-8",
-                    status_code=400
-                )
-                
-        except Exception as e:
-            return func.HttpResponse(
-                json.dumps({
-                    "ok": False,
-                    "error": f"Erro na transcrição: {str(e)}"
-                }, ensure_ascii=False),
-                mimetype="application/json; charset=utf-8",
-                status_code=500
-            )
-
-        # Salvar transcrição com timestamps
-        transcript_data = {
-            "timestamp": timestamp,
-            "audio_filename": audio_filename,
-            "reason": transcription_reason,
-            "text": transcript_text,
-            "char_count": len(transcript_text),
-            "segments": segments,
-            "segment_count": segment_count,
-            "total_duration": segments[-1]["end_seconds"] if segments else 0,
-            "encoding": "utf-8"
-        }
+        logging.info("Variáveis OK, processando requisição...")
         
-        try:
-            transcript_url = _upload_to_storage(
-                container=os.getenv("STORAGE_CONTAINER_TRANSCRIPTS"),
-                blob_name=f"{base_name}-transcript-{timestamp}.json",
-                content=json.dumps(transcript_data, ensure_ascii=False, indent=2),
-                content_type="application/json"
-            )
-            logger.info(f"Transcrição salva: {transcript_url}")
-        except Exception as e:
-            logger.warning(f"Erro ao salvar transcrição: {e}")
-            transcript_url = None
-
-        # Gerar ATA com timestamps e correção UTF-8
-        ata_content = None
-        ata_url = None
-        ata_error = None
-        
-        try:
-            ata_content = _generate_meeting_minutes_with_timestamps(transcript_data)
-            logger.info(f"ATA gerada: {len(ata_content)} caracteres")
-            
-            # Salvar ATA
-            ata_url = _upload_to_storage(
-                container=os.getenv("STORAGE_CONTAINER_ATAS"),
-                blob_name=f"{base_name}-ata-{timestamp}.md",
-                content=ata_content,
-                content_type="text/markdown"
-            )
-            logger.info(f"ATA salva: {ata_url}")
-            
-        except Exception as e:
-            ata_error = str(e)
-            logger.error(f"Erro na geração da ATA: {e}")
-
-        # Resposta final
-        response_data = {
-            "ok": True,
-            "marker": MARKER,
-            "timestamp": timestamp,
-            "processing": {
-                "audio_size_bytes": len(audio_bytes),
-                "transcript_chars": len(transcript_text),
-                "transcription_reason": transcription_reason,
-                "segment_count": segment_count,
-                "total_duration_seconds": transcript_data.get("total_duration", 0),
-                "ata_generated": ata_content is not None,
-                "ata_chars": len(ata_content) if ata_content else 0,
-                "encoding": "utf-8"
-            },
-            "preview": {
-                "transcript": transcript_text[:300] + ("..." if len(transcript_text) > 300 else ""),
-                "first_segments": segments[:3] if segments else [],
-                "ata": ata_content[:400] + ("..." if ata_content and len(ata_content) > 400 else "") if ata_content else None
-            },
-            "urls": {
-                "original_audio": original_audio_url,
-                "transcript": transcript_url,
-                "ata": ata_url
-            },
-            "errors": {
-                "ata_generation": ata_error
-            }
-        }
-
         return func.HttpResponse(
-            json.dumps(response_data, ensure_ascii=False, indent=2),
-            mimetype="application/json; charset=utf-8",
-            status_code=200
+            json.dumps({"message": "Use ?ping=1 para testar"}),
+            mimetype="application/json",
+            status_code=400
         )
-
+        
     except Exception as e:
-        logger.exception("Erro não tratado na função")
-        
-        # Em modo debug, incluir stack trace
-        debug_mode = os.getenv("DEBUG") == "1"
-        error_response = {
-            "ok": False,
-            "error": str(e),
-            "marker": MARKER
-        }
-        
-        if debug_mode:
-            error_response["stack_trace"] = traceback.format_exc()
-        
+        logging.error(f"ERRO: {str(e)}")
+        logging.error(f"TRACEBACK: {traceback.format_exc()}")
         return func.HttpResponse(
-            json.dumps(error_response, ensure_ascii=False),
-            mimetype="application/json; charset=utf-8",
+            json.dumps({"error": str(e)}),
+            mimetype="application/json",
             status_code=500
         )
