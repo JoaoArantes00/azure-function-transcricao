@@ -8,18 +8,22 @@ from urllib.parse import urlparse
 import requests
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from openai import AzureOpenAI
+import azure.cognitiveservices.speech as speechsdk
+import time
+import threading
+import unicodedata
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Testando OpenAI')
+    logging.info('Testando Speech SDK sem OpenAI')
     
     try:
         if req.params.get("ping") == "1":
             return func.HttpResponse(
                 json.dumps({
                     "status": "success", 
-                    "message": "OpenAI OK",
-                    "tested": ["basic_imports", "azure.identity", "azure.storage.blob", "openai"]
+                    "message": "Speech SDK OK (sem OpenAI)",
+                    "tested": ["basic_imports", "azure.identity", "azure.storage.blob", "speech_sdk"],
+                    "problem_identified": "OpenAI library"
                 }),
                 mimetype="application/json",
                 status_code=200
