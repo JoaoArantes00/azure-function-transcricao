@@ -6,17 +6,18 @@ import traceback
 from datetime import datetime
 from urllib.parse import urlparse
 import requests
+from azure.identity import DefaultAzureCredential
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Testando importações básicas')
+    logging.info('Testando azure.identity')
     
     try:
         if req.params.get("ping") == "1":
             return func.HttpResponse(
                 json.dumps({
                     "status": "success", 
-                    "message": "Importações básicas OK",
-                    "tested": ["os", "traceback", "datetime", "urllib", "requests"]
+                    "message": "Azure Identity OK",
+                    "tested": ["basic_imports", "azure.identity"]
                 }),
                 mimetype="application/json",
                 status_code=200
