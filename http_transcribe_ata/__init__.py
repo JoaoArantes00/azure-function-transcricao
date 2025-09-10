@@ -1,4 +1,4 @@
-﻿import azure.functions as func
+import azure.functions as func
 import json, logging, os, traceback
 from datetime import datetime
 from urllib.parse import urlparse
@@ -35,9 +35,9 @@ def _normalize_text(text: str) -> str:
         'Ã ': 'à',  'Ã€': 'À',
         'Ã¨': 'è',  'Ãˆ': 'È',
         'Ã¬': 'ì',  'ÃŒ': 'Ì',
-        'Ã²': 'ò',  "Ã’": 'Ò',
+        'Ã²': 'ò',  "Ã'": 'Ò',
         'Ã¹': 'ù',  'Ã™': 'Ù',
-        'Ã±': 'ñ',  "Ã‘": 'Ñ',
+        'Ã±': 'ñ',  "Ã'": 'Ñ',
         'Ã¼': 'ü',  'Ãœ': 'Ü',
         'ÃªÃ§': 'eç',
         'ÃƒÂ': '',  # Remove marcadores UTF-8 malformados
@@ -313,19 +313,31 @@ def _upload_to_storage(container: str, blob_name: str, content, content_type: st
 def main(req: func.HttpRequest) -> func.HttpResponse:
     """Função principal para transcrição de áudio e geração de ATA com timestamps e correção UTF-8"""
     
-    # Configurar logging
+    # Configurar logging com mais detalhes
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     
     try:
+        logger.info("=== INICIO DA FUNÇÃO ===")
+        logger.info(f"Método da requisição: {req.method}")
+        logger.info(f"URL da requisição: {req.url}")
+        logger.info(f"Parâmetros da requisição: {dict(req.params)}")
+        
         # Verificar se é ping
+        logger.info("Verificando parâmetro ping...")
         if req.params.get("ping") == "1":
+            logger.info("Ping detectado, retornando pong")
             return func.HttpResponse(
                 json.dumps({
                     "ok": True, 
                     "status": "pong", 
                     "marker": MARKER,
-                    "message": "Serviço de transcrição com timestamps e correção UTF-8 funcionando!",
+                    "message": "DEBUG: Serviço de transcrição com timestamps e correção UTF-8 funcionando!",
+                    "debug_info": {
+                        "method": req.method,
+                        "url": str(req.url),
+                        "params": dict(req.params)
+                    },
                     "features": [
                         "audio_transcription", 
                         "timestamp_tracking", 
@@ -338,6 +350,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
 
+        logger.info("Verificando variáveis de ambiente necessárias...")
         # Verificar variáveis de ambiente necessárias
         required_vars = [
             "SPEECH_KEY", "SPEECH_REGION",
@@ -348,19 +361,26 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         env_ok, env_error = _require_env(required_vars)
         if not env_ok:
+            logger.error(f"Erro nas variáveis de ambiente: {env_error}")
             return func.HttpResponse(
                 json.dumps({"ok": False, "error": env_error}, ensure_ascii=False),
                 mimetype="application/json; charset=utf-8",
                 status_code=500
             )
+        
+        logger.info("Todas as variáveis de ambiente estão OK")
 
         # Processar requisição
+        logger.info("Processando requisição...")
         content_type = (req.headers.get("content-type") or "").lower()
+        logger.info(f"Content-Type: {content_type}")
+        
         audio_bytes = None
         audio_filename = None
 
         if content_type.startswith("application/json"):
             # Modo JSON: espera URL do áudio
+            logger.info("Modo JSON detectado")
             try:
                 body = req.get_json()
                 if not body:
@@ -373,6 +393,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                         status_code=400
                     )
             except Exception as e:
+                logger.error(f"Erro ao processar JSON: {str(e)}")
                 return func.HttpResponse(
                     json.dumps({
                         "ok": False, 
@@ -395,10 +416,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             
             # Download do áudio
             try:
+                logger.info(f"Fazendo download do áudio: {audio_url}")
                 audio_bytes = _download_to_bytes(audio_url)
                 audio_filename = os.path.basename(urlparse(audio_url).path) or "audio.wav"
                 logger.info(f"Áudio baixado: {len(audio_bytes)} bytes, nome: {audio_filename}")
             except Exception as e:
+                logger.error(f"Erro no download do áudio: {str(e)}")
                 return func.HttpResponse(
                     json.dumps({
                         "ok": False, 
@@ -410,6 +433,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         elif content_type.startswith("audio/") or content_type.startswith("application/octet-stream"):
             # Modo binário: áudio enviado diretamente
+            logger.info("Modo binário detectado")
             audio_bytes = req.get_body()
             if not audio_bytes:
                 return func.HttpResponse(
@@ -424,6 +448,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             logger.info(f"Áudio recebido: {len(audio_bytes)} bytes")
 
         else:
+            logger.error(f"Content-Type não suportado: {content_type}")
             return func.HttpResponse(
                 json.dumps({
                     "ok": False, 
@@ -434,6 +459,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             )
 
         # Salvar áudio original (opcional)
+        logger.info("Salvando áudio original...")
         timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         base_name = os.path.splitext(audio_filename)[0]
         
@@ -450,6 +476,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             original_audio_url = None
 
         # Transcrever áudio com timestamps e correção UTF-8
+        logger.info("Iniciando transcrição...")
         try:
             transcription_result = _speech_transcribe_from_bytes(audio_bytes)
             transcript_text = transcription_result.get("text", "")
@@ -471,6 +498,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 )
                 
         except Exception as e:
+            logger.error(f"Erro na transcrição: {str(e)}")
             return func.HttpResponse(
                 json.dumps({
                     "ok": False,
@@ -481,6 +509,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             )
 
         # Salvar transcrição com timestamps
+        logger.info("Salvando transcrição...")
         transcript_data = {
             "timestamp": timestamp,
             "audio_filename": audio_filename,
@@ -506,6 +535,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             transcript_url = None
 
         # Gerar ATA com timestamps e correção UTF-8
+        logger.info("Gerando ATA...")
         ata_content = None
         ata_url = None
         ata_error = None
@@ -528,6 +558,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             logger.error(f"Erro na geração da ATA: {e}")
 
         # Resposta final
+        logger.info("Preparando resposta final...")
         response_data = {
             "ok": True,
             "marker": MARKER,
@@ -557,6 +588,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             }
         }
 
+        logger.info("=== FUNÇÃO CONCLUÍDA COM SUCESSO ===")
         return func.HttpResponse(
             json.dumps(response_data, ensure_ascii=False, indent=2),
             mimetype="application/json; charset=utf-8",
@@ -564,14 +596,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     except Exception as e:
-        logger.exception("Erro não tratado na função")
+        logger.error(f"=== ERRO NÃO TRATADO ===")
+        logger.error(f"Erro: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         
         # Em modo debug, incluir stack trace
         debug_mode = os.getenv("DEBUG") == "1"
         error_response = {
             "ok": False,
             "error": str(e),
-            "marker": MARKER
+            "marker": MARKER,
+            "debug_error": True
         }
         
         if debug_mode:
