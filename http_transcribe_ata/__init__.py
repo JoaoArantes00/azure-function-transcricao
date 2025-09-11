@@ -504,8 +504,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=400
                 )
 
-        elif content_type.startswith("audio/") or content_type.startswith("application/octet-stream"):
+        elif content_type.startswith("audio/") or content_type.startswith("video/") or content_type.startswith("application/octet-stream") or content_type == "":
             # Modo binário: áudio enviado diretamente
+            # Aceita também application/octet-stream (comum para .aac e outros formatos)
             audio_bytes = req.get_body()
             if not audio_bytes:
                 return func.HttpResponse(
@@ -516,8 +517,35 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     mimetype="application/json; charset=utf-8",
                     status_code=400
                 )
-            audio_filename = "audio_upload.wav"
-            logger.info(f"Áudio recebido: {len(audio_bytes)} bytes")
+            
+            # Tentar detectar nome do arquivo do header Content-Disposition
+            content_disposition = req.headers.get("content-disposition", "")
+            if "filename=" in content_disposition:
+                try:
+                    import re
+                    filename_match = re.search(r'filename[^;=\n]*=([\'"]?)([^;\'"]*)\1', content_disposition)
+                    if filename_match:
+                        audio_filename = filename_match.group(2)
+                    else:
+                        audio_filename = "audio_upload.wav"
+                except:
+                    audio_filename = "audio_upload.wav"
+            else:
+                # Tentar adivinhar extensão pelo Content-Type
+                if "aac" in content_type.lower():
+                    audio_filename = "audio_upload.aac"
+                elif "wma" in content_type.lower():
+                    audio_filename = "audio_upload.wma"
+                elif "mp3" in content_type.lower() or "mpeg" in content_type.lower():
+                    audio_filename = "audio_upload.mp3"
+                elif "ogg" in content_type.lower():
+                    audio_filename = "audio_upload.ogg"
+                elif "m4a" in content_type.lower():
+                    audio_filename = "audio_upload.m4a"
+                else:
+                    audio_filename = "audio_upload.wav"
+            
+            logger.info(f"Áudio recebido: {len(audio_bytes)} bytes, Content-Type: {content_type}, filename: {audio_filename}")
 
         else:
             return func.HttpResponse(
