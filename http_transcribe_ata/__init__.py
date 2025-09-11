@@ -10,8 +10,27 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 import time
 import threading
 import unicodedata
+import subprocess
+import tempfile
 
-MARKER = "PRODUCTION_VERSION_V2_TIMESTAMPS_UTF8"
+MARKER = "PRODUCTION_VERSION_V2_TIMESTAMPS_UTF8_WMP11"
+
+# Formatos suportados incluindo WMP11
+SUPPORTED_FORMATS = {
+    # Formatos nativos do Azure Speech
+    '.wav': {'native': True, 'mime': 'audio/wav'},
+    '.mp3': {'native': True, 'mime': 'audio/mpeg'},
+    '.ogg': {'native': True, 'mime': 'audio/ogg'},
+    '.m4a': {'native': True, 'mime': 'audio/m4a'},
+    '.mp4': {'native': True, 'mime': 'audio/mp4'},
+    '.aac': {'native': True, 'mime': 'audio/aac'},
+    
+    # Formatos WMP11 que precisam conversão
+    '.wma': {'native': False, 'mime': 'audio/x-ms-wma'},
+    '.wmv': {'native': False, 'mime': 'video/x-ms-wmv'},
+    '.asf': {'native': False, 'mime': 'video/x-ms-asf'},
+    '.wm': {'native': False, 'mime': 'audio/x-ms-wm'}
+}
 
 def _normalize_text(text: str) -> str:
     """Normalizar texto para corrigir problemas de codificação"""
@@ -55,6 +74,78 @@ def _normalize_text(text: str) -> str:
     text = ''.join(char for char in text if unicodedata.category(char)[0] != 'C' or char in '\n\r\t')
     
     return text.strip()
+
+def _validate_file_format(filename: str, content_type: str = None) -> dict:
+    """Validar formato do arquivo e determinar se precisa conversão"""
+    ext = os.path.splitext(filename.lower())[1]
+    
+    if ext not in SUPPORTED_FORMATS:
+        return {
+            'valid': False,
+            'error': f'Formato {ext} não suportado. Formatos aceitos: {", ".join(SUPPORTED_FORMATS.keys())}'
+        }
+    
+    format_info = SUPPORTED_FORMATS[ext]
+    return {
+        'valid': True,
+        'extension': ext,
+        'native': format_info['native'],
+        'mime': format_info['mime'],
+        'needs_conversion': not format_info['native']
+    }
+
+def _convert_audio_to_wav(audio_bytes: bytes, input_format: str) -> bytes:
+    """Converter áudio WMP11 para WAV usando FFmpeg"""
+    try:
+        # Criar arquivos temporários
+        with tempfile.NamedTemporaryFile(suffix=input_format, delete=False) as input_file:
+            input_file.write(audio_bytes)
+            input_path = input_file.name
+        
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as output_file:
+            output_path = output_file.name
+        
+        # Comando FFmpeg para conversão
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-acodec', 'pcm_s16le',  # PCM 16-bit
+            '-ar', '48000',          # Sample rate 48kHz
+            '-ac', '2',              # Stereo
+            '-y',                    # Sobrescrever
+            output_path
+        ]
+        
+        # Executar conversão
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            timeout=300  # 5 minutos timeout
+        )
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg falhou: {result.stderr}")
+        
+        # Ler arquivo convertido
+        with open(output_path, 'rb') as f:
+            converted_bytes = f.read()
+        
+        # Limpar arquivos temporários
+        try:
+            os.unlink(input_path)
+            os.unlink(output_path)
+        except:
+            pass
+        
+        logging.info(f"Conversão {input_format} -> WAV concluída: {len(audio_bytes)} -> {len(converted_bytes)} bytes")
+        return converted_bytes
+        
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Timeout na conversão de áudio")
+    except Exception as e:
+        logging.exception("Erro na conversão de áudio")
+        raise RuntimeError(f"Erro na conversão: {str(e)}")
 
 def _download_to_bytes(url: str) -> bytes:
     """Download arquivo de uma URL"""
@@ -312,7 +403,7 @@ def _upload_to_storage(container: str, blob_name: str, content, content_type: st
         raise RuntimeError(f"Erro no upload: {str(e)}")
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    """Função principal para transcrição de áudio e geração de ATA com timestamps e correção UTF-8"""
+    """Função principal para transcrição de áudio e geração de ATA com timestamps, correção UTF-8 e suporte WMP11"""
     
     # Configurar logging
     logging.basicConfig(level=logging.INFO)
@@ -326,14 +417,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     "ok": True, 
                     "status": "pong", 
                     "marker": MARKER,
-                    "message": "Serviço de transcrição com timestamps e correção UTF-8 funcionando!",
+                    "message": "Serviço de transcrição com timestamps, correção UTF-8 e suporte WMP11 funcionando!",
                     "features": [
                         "audio_transcription", 
                         "timestamp_tracking", 
                         "utf8_normalization",
                         "ata_generation", 
-                        "azure_storage"
-                    ]
+                        "azure_storage",
+                        "wmp11_support",
+                        "audio_conversion"
+                    ],
+                    "supported_formats": list(SUPPORTED_FORMATS.keys())
                 }, ensure_ascii=False),
                 mimetype="application/json; charset=utf-8",
                 status_code=200
@@ -359,6 +453,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         content_type = (req.headers.get("content-type") or "").lower()
         audio_bytes = None
         audio_filename = None
+        conversion_info = None
 
         if content_type.startswith("application/json"):
             # Modo JSON: espera URL do áudio
@@ -434,6 +529,48 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=400
             )
 
+        # Validar formato do arquivo
+        format_validation = _validate_file_format(audio_filename, content_type)
+        if not format_validation['valid']:
+            return func.HttpResponse(
+                json.dumps({
+                    "ok": False,
+                    "error": format_validation['error']
+                }, ensure_ascii=False),
+                mimetype="application/json; charset=utf-8",
+                status_code=400
+            )
+
+        # Converter áudio se necessário (formatos WMP11)
+        original_size = len(audio_bytes)
+        if format_validation['needs_conversion']:
+            try:
+                logger.info(f"Convertendo {format_validation['extension']} para WAV...")
+                converted_bytes = _convert_audio_to_wav(audio_bytes, format_validation['extension'])
+                conversion_info = {
+                    'converted': True,
+                    'original_format': format_validation['extension'],
+                    'original_size': original_size,
+                    'converted_size': len(converted_bytes)
+                }
+                audio_bytes = converted_bytes
+                logger.info(f"Conversão concluída: {original_size} -> {len(audio_bytes)} bytes")
+            except Exception as e:
+                return func.HttpResponse(
+                    json.dumps({
+                        "ok": False,
+                        "error": f"Erro na conversão de {format_validation['extension']}: {str(e)}"
+                    }, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    status_code=500
+                )
+        else:
+            conversion_info = {
+                'converted': False,
+                'original_format': format_validation['extension'],
+                'original_size': original_size
+            }
+
         # Salvar áudio original (opcional)
         timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         base_name = os.path.splitext(audio_filename)[0]
@@ -465,7 +602,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     json.dumps({
                         "ok": False,
                         "error": "Nenhum texto foi transcrito do áudio",
-                        "reason": transcription_reason
+                        "reason": transcription_reason,
+                        "conversion_info": conversion_info
                     }, ensure_ascii=False),
                     mimetype="application/json; charset=utf-8",
                     status_code=400
@@ -475,7 +613,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 json.dumps({
                     "ok": False,
-                    "error": f"Erro na transcrição: {str(e)}"
+                    "error": f"Erro na transcrição: {str(e)}",
+                    "conversion_info": conversion_info
                 }, ensure_ascii=False),
                 mimetype="application/json; charset=utf-8",
                 status_code=500
@@ -491,7 +630,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             "segments": segments,
             "segment_count": segment_count,
             "total_duration": segments[-1]["end_seconds"] if segments else 0,
-            "encoding": "utf-8"
+            "encoding": "utf-8",
+            "conversion_info": conversion_info
         }
         
         try:
@@ -541,7 +681,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 "total_duration_seconds": transcript_data.get("total_duration", 0),
                 "ata_generated": ata_content is not None,
                 "ata_chars": len(ata_content) if ata_content else 0,
-                "encoding": "utf-8"
+                "encoding": "utf-8",
+                "conversion_info": conversion_info
             },
             "preview": {
                 "transcript": transcript_text[:300] + ("..." if len(transcript_text) > 300 else ""),
@@ -583,5 +724,3 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json; charset=utf-8",
             status_code=500
         )
-
-
