@@ -40,6 +40,7 @@ ACCEPTED_MIME_TYPES = [
     'audio/ogg', 'audio/m4a', 'audio/mp4',
     'audio/aac', 'audio/aacp', 'audio/x-aac',
     'audio/vnd.dlna.adts',  # ADTS específico encontrado no debug
+    'audio/adts',           # Variação comum do ADTS
     'audio/x-ms-wma', 'audio/wma',
     'video/x-ms-wmv', 'video/wmv',
     'video/x-ms-asf', 'application/vnd.ms-asf',
