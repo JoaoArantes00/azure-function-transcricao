@@ -111,7 +111,8 @@ def _transcribe_audio(audio_bytes, language="pt-BR"):
     speech_config.request_word_level_timestamps()
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
-    audio_config = speechsdk.audio.AudioConfig(stream=speechsdk.audio.PushAudioInputStream())
+    push_stream = speechsdk.audio.PushAudioInputStream()
+    audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
     recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
     
     results = []
@@ -131,11 +132,10 @@ def _transcribe_audio(audio_bytes, language="pt-BR"):
     
     recognizer.start_continuous_recognition()
     
-    stream = audio_config.stream
     chunk_size = 32000
     for i in range(0, len(audio_bytes), chunk_size):
-        stream.write(audio_bytes[i:i+chunk_size])
-    stream.close()
+        push_stream.write(audio_bytes[i:i+chunk_size])
+    push_stream.close()
     
     import time
     while not done:
