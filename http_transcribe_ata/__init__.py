@@ -10,8 +10,9 @@ import azure.cognitiveservices.speech as speechsdk
 from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
+import tempfile
 
-MARKER = "PRODUCTION_VERSION_V6_SIMPLIFIED"
+MARKER = "PRODUCTION_VERSION_V7_FILE_METHOD"
 
 def _cors_headers():
     return {
@@ -111,78 +112,84 @@ def _transcribe_audio(audio_bytes, language="pt-BR"):
     
     speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=speech_region)
     speech_config.speech_recognition_language = language
-    speech_config.request_word_level_timestamps()
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
-    push_stream = speechsdk.audio.PushAudioInputStream()
-    audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+    # MUDANCA: Usar arquivo temporario ao inves de stream
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+        tmp_file.write(audio_bytes)
+        tmp_path = tmp_file.name
     
-    results = []
-    done = False
-    
-    def recognized_cb(evt):
-        if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            results.append(evt.result)
-            logging.info(f"Reconhecido: {evt.result.text[:50]}...")
-    
-    def session_stopped_cb(evt):
-        nonlocal done
-        done = True
-    
-    recognizer.recognized.connect(recognized_cb)
-    recognizer.session_stopped.connect(session_stopped_cb)
-    recognizer.canceled.connect(session_stopped_cb)
-    
-    recognizer.start_continuous_recognition()
-    
-    chunk_size = 32000
-    for i in range(0, len(audio_bytes), chunk_size):
-        push_stream.write(audio_bytes[i:i+chunk_size])
-    push_stream.close()
-    
-    import time
-    timeout = 600
-    start = time.time()
-    while not done and (time.time() - start) < timeout:
-        time.sleep(0.1)
-    
-    recognizer.stop_continuous_recognition()
-    
-    logging.info(f"Transcricao finalizada. Total de resultados: {len(results)}")
-    
-    transcript_parts = []
-    for result in results:
-        try:
-            import json as json_lib
-            detailed = json_lib.loads(result.json)
-            if "NBest" in detailed and len(detailed["NBest"]) > 0:
-                best = detailed["NBest"][0]
-                text = best.get("Display", result.text)
-                offset_ticks = result.offset
-                duration_ticks = result.duration
-                offset_seconds = offset_ticks / 10000000
-                duration_seconds = duration_ticks / 10000000
-                timestamp_start = _format_timestamp(offset_seconds)
-                timestamp_end = _format_timestamp(offset_seconds + duration_seconds)
+    try:
+        audio_config = speechsdk.audio.AudioConfig(filename=tmp_path)
+        recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+        
+        results = []
+        done = False
+        
+        def recognized_cb(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                results.append(evt.result)
+                logging.info(f"Reconhecido: {evt.result.text[:50]}...")
+        
+        def session_stopped_cb(evt):
+            nonlocal done
+            done = True
+        
+        recognizer.recognized.connect(recognized_cb)
+        recognizer.session_stopped.connect(session_stopped_cb)
+        recognizer.canceled.connect(session_stopped_cb)
+        
+        recognizer.start_continuous_recognition()
+        
+        import time
+        timeout = 600
+        start = time.time()
+        while not done and (time.time() - start) < timeout:
+            time.sleep(0.1)
+        
+        recognizer.stop_continuous_recognition()
+        
+        logging.info(f"Transcricao finalizada. Total de resultados: {len(results)}")
+        
+        transcript_parts = []
+        for result in results:
+            try:
+                import json as json_lib
+                detailed = json_lib.loads(result.json)
+                if "NBest" in detailed and len(detailed["NBest"]) > 0:
+                    best = detailed["NBest"][0]
+                    text = best.get("Display", result.text)
+                    offset_ticks = result.offset
+                    duration_ticks = result.duration
+                    offset_seconds = offset_ticks / 10000000
+                    duration_seconds = duration_ticks / 10000000
+                    timestamp_start = _format_timestamp(offset_seconds)
+                    timestamp_end = _format_timestamp(offset_seconds + duration_seconds)
+                    transcript_parts.append({
+                        "text": text,
+                        "start": timestamp_start,
+                        "end": timestamp_end,
+                        "start_seconds": offset_seconds,
+                        "end_seconds": offset_seconds + duration_seconds
+                    })
+            except:
                 transcript_parts.append({
-                    "text": text,
-                    "start": timestamp_start,
-                    "end": timestamp_end,
-                    "start_seconds": offset_seconds,
-                    "end_seconds": offset_seconds + duration_seconds
+                    "text": result.text,
+                    "start": "00:00",
+                    "end": "00:00"
                 })
+        
+        full_text = " ".join([p["text"] for p in transcript_parts])
+        logging.info(f"Transcricao completa: {len(full_text)} caracteres")
+        
+        return {"text": full_text, "parts": transcript_parts}
+    
+    finally:
+        # Limpa arquivo temporario
+        try:
+            os.unlink(tmp_path)
         except:
-            transcript_parts.append({
-                "text": result.text,
-                "start": "00:00",
-                "end": "00:00"
-            })
-    
-    full_text = " ".join([p["text"] for p in transcript_parts])
-    logging.info(f"Transcricao completa: {len(full_text)} caracteres")
-    
-    return {"text": full_text, "parts": transcript_parts}
+            pass
 
 def _generate_ata(transcript):
     ok, msg = _require_env(["AZURE_OPENAI_KEY", "AZURE_OPENAI_ENDPOINT"])
@@ -292,7 +299,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             container_input = os.getenv("STORAGE_CONTAINER_INPUT")
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
             audio_blob_name = f"audios/{ts}/audio.wav"
+            
+            # Salva o audio EXATAMENTE como recebeu
+            logging.info(f"Salvando audio de {len(audio_bytes)} bytes")
             blob_url_final = _upload_to_storage(container_input, audio_blob_name, audio_bytes, "audio/wav")
+            logging.info(f"Audio salvo em: {blob_url_final}")
         
         logging.info("Iniciando transcricao...")
         transcript_data = _transcribe_audio(audio_bytes, language="pt-BR")
