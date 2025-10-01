@@ -15,6 +15,19 @@ import unicodedata
 MARKER = "PRODUCTION_VERSION_V2_TIMESTAMPS_UTF8+SAS_UPLOAD"
 
 # =============================
+# Headers CORS
+# =============================
+
+def _cors_headers():
+    """Headers CORS para todas as respostas"""
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, x-functions-key",
+        "Access-Control-Max-Age": "3600"
+    }
+
+# =============================
 # Utilidades de texto / UTF-8
 # =============================
 
@@ -25,12 +38,12 @@ def _normalize_text(text: str) -> str:
     corrections = {
         'Ã§': 'ç',  'Ã‡': 'Ç', 'Ã£': 'ã',  'Ã': 'Ã',
         'Ã¡': 'á',  'Ã©': 'é',  'Ã‰': 'É', 'Ã³': 'ó',
-        'Ã“': 'Ó', 'Ãº': 'ú',  'Ãš': 'Ú', 'Ã¢': 'â',
+        'Ã"': 'Ó', 'Ãº': 'ú',  'Ãš': 'Ú', 'Ã¢': 'â',
         'Ã‚': 'Â', 'Ãª': 'ê',  'ÃŠ': 'Ê', 'Ã´': 'ô',
-        'Ã”': 'Ô', 'Ã ': 'à',  'Ã€': 'À', 'Ã¨': 'è',
+        'Ã"': 'Ô', 'Ã ': 'à',  'Ã€': 'À', 'Ã¨': 'è',
         'Ãˆ': 'È', 'Ã¬': 'ì',  'ÃŒ': 'Ì', 'Ã²': 'ò',
-        'Ã’': 'Ò', 'Ã¹': 'ù',  'Ã™': 'Ù', 'Ã±': 'ñ',
-        'Ã‘': 'Ñ', 'Ã¼': 'ü',  'Ãœ': 'Ü', 'ÃƒÂ': '',
+        'Ã'': 'Ò', 'Ã¹': 'ù',  'Ã™': 'Ù', 'Ã±': 'ñ',
+        'Ã'': 'Ñ', 'Ã¼': 'ü',  'Ãœ': 'Ü', 'ÃƒÂ': '',
         'â€™': "'", 'â€œ': '"', 'â€\x9d': '"', 'â€"': '–', 'â€¦': '…',
     }
     for wrong, correct in corrections.items():
@@ -260,6 +273,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     logger = logging.getLogger(__name__)
 
     try:
+        # Responde a preflight OPTIONS (CORS)
+        if req.method == "OPTIONS":
+            return func.HttpResponse(
+                "",
+                headers=_cors_headers(),
+                status_code=200
+            )
+
         # Ping rápido
         if req.params.get("ping") == "1":
             return func.HttpResponse(
@@ -268,7 +289,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     "message": "Transcrição com timestamps/UTF-8 + SAS de upload ok",
                     "features": ["audio_transcription","timestamp_tracking","utf8_normalization","ata_generation","blob_sas_upload"]
                 }, ensure_ascii=False),
-                mimetype="application/json; charset=utf-8", status_code=200
+                mimetype="application/json; charset=utf-8",
+                headers=_cors_headers(),
+                status_code=200
             )
 
         # ========= Modo 0: gerar SAS de upload para arquivos grandes =========
@@ -276,18 +299,30 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             filename = req.params.get("filename") or "audio.wav"
             container = os.getenv("STORAGE_CONTAINER_INPUT")
             if not container:
-                return func.HttpResponse(json.dumps({"ok":False,"error":"STORAGE_CONTAINER_INPUT ausente"}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=500)
+                return func.HttpResponse(
+                    json.dumps({"ok":False,"error":"STORAGE_CONTAINER_INPUT ausente"}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=500
+                )
             # opcional: prefixo por data
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
             blob_name = f"uploads/{ts}/{filename}"
             try:
                 sas = _make_upload_sas(container, blob_name, minutes_valid=int(os.getenv("UPLOAD_SAS_MINUTES","120")))
-                return func.HttpResponse(json.dumps({"ok":True, "upload": sas, "marker": MARKER}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=200)
+                return func.HttpResponse(
+                    json.dumps({"ok":True, "upload": sas, "marker": MARKER}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=200
+                )
             except Exception as e:
-                return func.HttpResponse(json.dumps({"ok":False,"error":str(e)}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=500)
+                return func.HttpResponse(
+                    json.dumps({"ok":False,"error":str(e)}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=500
+                )
 
         # ========= Verificação de variáveis obrigatórias =========
         required = [
@@ -297,8 +332,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         ]
         ok_env, env_msg = _require_env(required)
         if not ok_env:
-            return func.HttpResponse(json.dumps({"ok":False,"error":env_msg}, ensure_ascii=False),
-                                     mimetype="application/json; charset=utf-8", status_code=500)
+            return func.HttpResponse(
+                json.dumps({"ok":False,"error":env_msg}, ensure_ascii=False),
+                mimetype="application/json; charset=utf-8",
+                headers=_cors_headers(),
+                status_code=500
+            )
 
         # ========= Entrada: JSON (audio_url) ou binário pequeno =========
         content_type = (req.headers.get("content-type") or "").lower()
@@ -310,19 +349,31 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             try:
                 body = req.get_json()
             except Exception as e:
-                return func.HttpResponse(json.dumps({"ok":False,"error":f"JSON inválido: {str(e)}"}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=400)
+                return func.HttpResponse(
+                    json.dumps({"ok":False,"error":f"JSON inválido: {str(e)}"}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=400
+                )
             audio_url = (body or {}).get("audio_url")
             if not audio_url:
-                return func.HttpResponse(json.dumps({"ok":False,"error":"Campo 'audio_url' é obrigatório"}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=400)
+                return func.HttpResponse(
+                    json.dumps({"ok":False,"error":"Campo 'audio_url' é obrigatório"}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=400
+                )
             try:
                 audio_bytes = _download_to_bytes(audio_url)
                 audio_filename = os.path.basename(urlparse(audio_url).path) or "audio.wav"
                 logger.info(f"Baixado do blob: {len(audio_bytes)} bytes")
             except Exception as e:
-                return func.HttpResponse(json.dumps({"ok":False,"error":f"Erro ao baixar áudio: {str(e)}"}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=400)
+                return func.HttpResponse(
+                    json.dumps({"ok":False,"error":f"Erro ao baixar áudio: {str(e)}"}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=400
+                )
 
         elif content_type.startswith("audio/") or content_type.startswith("application/octet-stream"):
             # Tenta checar Content-Length antes de ler
@@ -334,20 +385,27 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                                     "error": f"Arquivo acima de {max_upload_mb}MB. Use fluxo grande: GET ?get_upload_url=1 e depois POST com audio_url."},
                                    ensure_ascii=False),
                         mimetype="application/json; charset=utf-8",
+                        headers=_cors_headers(),
                         status_code=413
                     )
             except: pass
 
             audio_bytes = req.get_body()
             if not audio_bytes:
-                return func.HttpResponse(json.dumps({"ok":False,"error":"Corpo da requisição vazio"}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=400)
+                return func.HttpResponse(
+                    json.dumps({"ok":False,"error":"Corpo da requisição vazio"}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=400
+                )
             if len(audio_bytes) > max_upload_mb * 1024 * 1024:
                 return func.HttpResponse(
                     json.dumps({"ok":False,
                                 "error": f"Arquivo acima de {max_upload_mb}MB. Use fluxo grande: GET ?get_upload_url=1 e depois POST com audio_url."},
                                ensure_ascii=False),
-                    mimetype="application/json; charset=utf-8", status_code=413
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=413
                 )
             audio_filename = "audio_upload.wav"
             logger.info(f"Recebido binário pequeno: {len(audio_bytes)} bytes")
@@ -357,7 +415,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 json.dumps({"ok":False,
                             "error":"Content-Type não suportado. Use application/json com audio_url OU envie áudio binário pequeno."},
                            ensure_ascii=False),
-                mimetype="application/json; charset=utf-8", status_code=400
+                mimetype="application/json; charset=utf-8",
+                headers=_cors_headers(),
+                status_code=400
             )
 
         # ========= (Opcional) Salva cópia do áudio de entrada =========
@@ -384,11 +444,19 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
             logger.info(f"Transcrição: {len(transcript_text)} chars, {seg_count} segmentos, reason={reason}")
             if not transcript_text.strip():
-                return func.HttpResponse(json.dumps({"ok":False,"error":"Nenhum texto foi transcrito do áudio","reason":reason}, ensure_ascii=False),
-                                         mimetype="application/json; charset=utf-8", status_code=400)
+                return func.HttpResponse(
+                    json.dumps({"ok":False,"error":"Nenhum texto foi transcrito do áudio","reason":reason}, ensure_ascii=False),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=400
+                )
         except Exception as e:
-            return func.HttpResponse(json.dumps({"ok":False,"error":f"Erro na transcrição: {str(e)}"}, ensure_ascii=False),
-                                     mimetype="application/json; charset=utf-8", status_code=500)
+            return func.HttpResponse(
+                json.dumps({"ok":False,"error":f"Erro na transcrição: {str(e)}"}, ensure_ascii=False),
+                mimetype="application/json; charset=utf-8",
+                headers=_cors_headers(),
+                status_code=500
+            )
 
         # ========= Persistência da transcrição =========
         transcript_data = {
@@ -456,13 +524,21 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 "ata_generation": ata_error
             }
         }
-        return func.HttpResponse(json.dumps(resp, ensure_ascii=False, indent=2),
-                                 mimetype="application/json; charset=utf-8", status_code=200)
+        return func.HttpResponse(
+            json.dumps(resp, ensure_ascii=False, indent=2),
+            mimetype="application/json; charset=utf-8",
+            headers=_cors_headers(),
+            status_code=200
+        )
 
     except Exception as e:
         logger.exception("Erro não tratado")
         debug_mode = os.getenv("DEBUG") == "1"
         err = {"ok": False, "error": str(e), "marker": MARKER}
         if debug_mode: err["stack_trace"] = traceback.format_exc()
-        return func.HttpResponse(json.dumps(err, ensure_ascii=False),
-                                 mimetype="application/json; charset=utf-8", status_code=500)
+        return func.HttpResponse(
+            json.dumps(err, ensure_ascii=False),
+            mimetype="application/json; charset=utf-8",
+            headers=_cors_headers(),
+            status_code=500
+        )
