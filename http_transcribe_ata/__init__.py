@@ -185,16 +185,16 @@ def _transcribe_audio(audio_bytes, language="pt-BR"):
     }
 
 def _generate_ata(transcript):
-    ok, msg = _require_env(["OPENAI_API_KEY", "OPENAI_ENDPOINT"])
+    ok, msg = _require_env(["AZURE_OPENAI_KEY", "AZURE_OPENAI_ENDPOINT"])
     if not ok:
         raise RuntimeError(msg)
     
     openai.api_type = "azure"
-    openai.api_base = os.getenv("OPENAI_ENDPOINT")
+    openai.api_base = os.getenv("AZURE_OPENAI_ENDPOINT")
     openai.api_version = "2024-02-15-preview"
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+    openai.api_key = os.getenv("AZURE_OPENAI_KEY")
     
-    deployment_name = os.getenv("OPENAI_DEPLOYMENT_NAME", "gpt-4")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
     
     system_prompt = """Voce e um assistente especializado em criar ATAs (Atas de Reuniao) profissionais.
 Analise a transcricao fornecida e crie uma ATA estruturada com:
