@@ -10,16 +10,10 @@ import azure.cognitiveservices.speech as speechsdk
 import openai
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
-import unicodedata
 
-MARKER = "PRODUCTION_VERSION_V3_FIXED_ENCODING"
-
-# =============================
-# Headers CORS
-# =============================
+MARKER = "PRODUCTION_VERSION_V4_SIMPLIFIED"
 
 def _cors_headers():
-    """Headers CORS para todas as respostas"""
     return {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -27,52 +21,17 @@ def _cors_headers():
         "Access-Control-Max-Age": "3600"
     }
 
-# =============================
-# Utilidades de texto / UTF-8
-# =============================
-
-def _normalize_text(text: str) -> str:
-    """Normaliza texto UTF-8 e corrige caracteres mal codificados"""
-    if not text:
-        return text
-    
-    text = unicodedata.normalize('NFC', text)
-    
-    corrections = {
-        'Ã§': 'ç', 'Ã‡': 'Ç', 'Ã£': 'ã', 'Ã': 'Ã',
-        'Ã¡': 'á', 'Ã©': 'é', 'Ã‰': 'É', 'Ã³': 'ó',
-        'Ã"': 'Ó', 'Ãº': 'ú', 'Ãš': 'Ú', 'Ã¢': 'â',
-        'Ã‚': 'Â', 'Ãª': 'ê', 'ÃŠ': 'Ê', 'Ã´': 'ô',
-        'Ã"': 'Ô', 'Ã ': 'à', 'Ã€': 'À', 'Ã¨': 'è',
-        'Ãˆ': 'È', 'Ã¬': 'ì', 'ÃŒ': 'Ì', 'Ã²': 'ò',
-        'Ã'': 'Ò', 'Ã¹': 'ù', 'Ã™': 'Ù', 'Ã±': 'ñ',
-        'Ã'': 'Ñ', 'Ã¼': 'ü', 'Ãœ': 'Ü'
-    }
-    
-    for wrong, correct in corrections.items():
-        text = text.replace(wrong, correct)
-    
-    text = ''.join(c for c in text if unicodedata.category(c)[0] != 'C' or c in '\n\r\t')
-    return text.strip()
-
-# =============================
-# Helpers de Storage / SAS
-# =============================
-
-def _blob_service() -> BlobServiceClient:
-    """Cria cliente do Blob Storage usando Managed Identity"""
+def _blob_service():
     account = os.getenv("STORAGE_ACCOUNT_NAME")
     cred = DefaultAzureCredential()
-    return BlobServiceClient(account_url=f"https://{account}.blob.core.windows.net", credential=cred)
+    return BlobServiceClient(
+        account_url=f"https://{account}.blob.core.windows.net",
+        credential=cred
+    )
 
-def _make_upload_sas(container: str, blob_name: str, minutes_valid: int = 120) -> dict:
-    """
-    Cria SAS de upload (user delegation SAS) para PUT direto do frontend.
-    Requer Managed Identity com 'Storage Blob Data Contributor'.
-    """
+def _make_upload_sas(container, blob_name, minutes_valid=120):
     bsc = _blob_service()
     account = os.getenv("STORAGE_ACCOUNT_NAME")
-    
     now = datetime.now(tz=timezone.utc)
     
     udk = bsc.get_user_delegation_key(
@@ -99,8 +58,7 @@ def _make_upload_sas(container: str, blob_name: str, minutes_valid: int = 120) -
         "sas_valid_minutes": minutes_valid
     }
 
-def _upload_to_storage(container: str, blob_name: str, content, content_type: str = "text/plain"):
-    """Upload com credencial do servidor (para salvar transcript/ata)"""
+def _upload_to_storage(container, blob_name, content, content_type="text/plain"):
     try:
         bsc = _blob_service()
         container_client = bsc.get_container_client(container)
@@ -109,8 +67,7 @@ def _upload_to_storage(container: str, blob_name: str, content, content_type: st
         if isinstance(content, bytes):
             data = content
         else:
-            normalized = _normalize_text(content) if isinstance(content, str) else content
-            data = normalized.encode("utf-8")
+            data = content.encode("utf-8")
         
         if content_type.startswith("text/") or content_type.startswith("application/json"):
             cs = ContentSettings(content_type=f"{content_type}; charset=utf-8")
@@ -125,34 +82,23 @@ def _upload_to_storage(container: str, blob_name: str, content, content_type: st
         logging.exception("Erro no upload para storage")
         raise RuntimeError(f"Erro no upload: {str(e)}")
 
-def _download_to_bytes(url: str) -> bytes:
-    """Download de arquivo via HTTP"""
+def _download_to_bytes(url):
     r = requests.get(url, timeout=120)
     r.raise_for_status()
     return r.content
 
-# =============================
-# Utilidades diversas
-# =============================
-
 def _require_env(keys):
-    """Verifica se variáveis de ambiente existem"""
     missing = [k for k in keys if not os.getenv(k)]
-    return (len(missing) == 0, f"Variáveis não configuradas: {', '.join(missing)}" if missing else "")
+    ok = len(missing) == 0
+    msg = f"Variaveis nao configuradas: {', '.join(missing)}" if missing else ""
+    return (ok, msg)
 
 def _format_timestamp(seconds):
-    """Formata segundos para MM:SS"""
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{minutes:02d}:{secs:02d}"
 
-# =============================
-# Speech / Transcrição
-# =============================
-
-def _transcribe_audio(audio_bytes: bytes, language: str = "pt-BR") -> dict:
-    """Transcreve áudio usando Azure Speech com timestamps"""
-    
+def _transcribe_audio(audio_bytes, language="pt-BR"):
     ok, msg = _require_env(["SPEECH_KEY", "SPEECH_REGION"])
     if not ok:
         raise RuntimeError(msg)
@@ -238,13 +184,7 @@ def _transcribe_audio(audio_bytes: bytes, language: str = "pt-BR") -> dict:
         "parts": transcript_parts
     }
 
-# =============================
-# OpenAI / Geração de ATA
-# =============================
-
-def _generate_ata(transcript: str) -> str:
-    """Gera ATA estruturada usando GPT-4"""
-    
+def _generate_ata(transcript):
     ok, msg = _require_env(["OPENAI_API_KEY", "OPENAI_ENDPOINT"])
     if not ok:
         raise RuntimeError(msg)
@@ -256,20 +196,20 @@ def _generate_ata(transcript: str) -> str:
     
     deployment_name = os.getenv("OPENAI_DEPLOYMENT_NAME", "gpt-4")
     
-    system_prompt = """Você é um assistente especializado em criar ATAs (Atas de Reunião) profissionais.
-Analise a transcrição fornecida e crie uma ATA estruturada com:
-- Título da reunião
-- Data e horário
+    system_prompt = """Voce e um assistente especializado em criar ATAs (Atas de Reuniao) profissionais.
+Analise a transcricao fornecida e crie uma ATA estruturada com:
+- Titulo da reuniao
+- Data e horario
 - Participantes mencionados
 - Resumo executivo
-- Tópicos discutidos com detalhes
-- Decisões tomadas
-- Ações e responsáveis
-- Próximos passos
+- Topicos discutidos com detalhes
+- Decisoes tomadas
+- Acoes e responsaveis
+- Proximos passos
 
 Formato em Markdown, profissional e objetivo."""
     
-    user_prompt = f"Transcrição da reunião:\n\n{transcript}\n\nGere a ATA completa:"
+    user_prompt = f"Transcricao da reuniao:\n\n{transcript}\n\nGere a ATA completa:"
     
     response = openai.ChatCompletion.create(
         engine=deployment_name,
@@ -284,15 +224,8 @@ Formato em Markdown, profissional e objetivo."""
     ata_content = response.choices[0].message.content
     return ata_content
 
-# =============================
-# MAIN HANDLER
-# =============================
-
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    """Handler principal da Azure Function"""
-    
     try:
-        # CORS preflight
         if req.method == "OPTIONS":
             return func.HttpResponse(
                 "",
@@ -300,14 +233,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Modo 1: Gerar SAS de upload para arquivos grandes
         if req.params.get("get_upload_url") == "1":
             filename = req.params.get("filename") or "audio.wav"
             container = os.getenv("STORAGE_CONTAINER_INPUT")
             
             if not container:
                 return func.HttpResponse(
-                    json.dumps({"ok": False, "error": "STORAGE_CONTAINER_INPUT ausente"}, ensure_ascii=False),
+                    json.dumps({"ok": False, "error": "STORAGE_CONTAINER_INPUT ausente"}),
                     mimetype="application/json; charset=utf-8",
                     headers=_cors_headers(),
                     status_code=500
@@ -319,7 +251,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             try:
                 sas = _make_upload_sas(container, blob_name, minutes_valid=int(os.getenv("UPLOAD_SAS_MINUTES", "120")))
                 return func.HttpResponse(
-                    json.dumps({"ok": True, "upload": sas, "marker": MARKER}, ensure_ascii=False),
+                    json.dumps({"ok": True, "upload": sas, "marker": MARKER}),
                     mimetype="application/json; charset=utf-8",
                     headers=_cors_headers(),
                     status_code=200
@@ -327,17 +259,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             except Exception as e:
                 logging.exception("Erro ao gerar SAS")
                 return func.HttpResponse(
-                    json.dumps({"ok": False, "error": f"Erro ao gerar SAS: {str(e)}"}, ensure_ascii=False),
+                    json.dumps({"ok": False, "error": f"Erro ao gerar SAS: {str(e)}"}),
                     mimetype="application/json; charset=utf-8",
                     headers=_cors_headers(),
                     status_code=500
                 )
         
-        # Modo 2: Processar áudio (upload direto ou via blob_url)
         audio_bytes = None
         blob_url_final = None
         
-        # Verifica se é JSON com blob_url
         try:
             body = req.get_json()
             blob_url = body.get("blob_url")
@@ -348,44 +278,38 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         except:
             pass
         
-        # Se não tem blob_url, pega do body direto
         if audio_bytes is None:
             audio_bytes = req.get_body()
             if not audio_bytes:
                 return func.HttpResponse(
-                    json.dumps({"ok": False, "error": "Nenhum áudio fornecido"}, ensure_ascii=False),
+                    json.dumps({"ok": False, "error": "Nenhum audio fornecido"}),
                     mimetype="application/json; charset=utf-8",
                     headers=_cors_headers(),
                     status_code=400
                 )
             
-            # Faz upload do áudio pequeno
             container_input = os.getenv("STORAGE_CONTAINER_INPUT")
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
             audio_blob_name = f"audios/{ts}/audio.wav"
             blob_url_final = _upload_to_storage(container_input, audio_blob_name, audio_bytes, "audio/wav")
         
-        # Transcrição
-        logging.info("Iniciando transcrição...")
+        logging.info("Iniciando transcricao...")
         transcript_data = _transcribe_audio(audio_bytes, language="pt-BR")
         transcript_text = transcript_data["text"]
         transcript_parts = transcript_data.get("parts", [])
         
-        # Salvar transcript
         container_atas = os.getenv("STORAGE_CONTAINER_ATAS")
         ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         
         transcript_blob_name = f"transcripts/{ts}/transcript.txt"
         transcript_url = _upload_to_storage(container_atas, transcript_blob_name, transcript_text, "text/plain")
         
-        # Gerar ATA
         logging.info("Gerando ATA...")
         ata_content = _generate_ata(transcript_text)
         
         ata_blob_name = f"atas/{ts}/ata.md"
         ata_url = _upload_to_storage(container_atas, ata_blob_name, ata_content, "text/markdown")
         
-        # Resposta
         result = {
             "ok": True,
             "audio_url": blob_url_final,
@@ -402,7 +326,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         }
         
         return func.HttpResponse(
-            json.dumps(result, ensure_ascii=False),
+            json.dumps(result),
             mimetype="application/json; charset=utf-8",
             headers=_cors_headers(),
             status_code=200
@@ -411,7 +335,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.exception("Erro no processamento")
         return func.HttpResponse(
-            json.dumps({"ok": False, "error": str(e), "trace": traceback.format_exc()}, ensure_ascii=False),
+            json.dumps({"ok": False, "error": str(e), "trace": traceback.format_exc()}),
             mimetype="application/json; charset=utf-8",
             headers=_cors_headers(),
             status_code=500
