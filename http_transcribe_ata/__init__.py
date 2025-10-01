@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import requests
 import azure.cognitiveservices.speech as speechsdk
-import openai
+from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
 
@@ -189,10 +189,11 @@ def _generate_ata(transcript):
     if not ok:
         raise RuntimeError(msg)
     
-    openai.api_type = "azure"
-    openai.api_base = os.getenv("AZURE_OPENAI_ENDPOINT")
-    openai.api_version = "2024-02-15-preview"
-    openai.api_key = os.getenv("AZURE_OPENAI_KEY")
+    client = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_KEY"),
+        api_version="2024-02-15-preview",
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
     
     deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
     
@@ -211,8 +212,8 @@ Formato em Markdown, profissional e objetivo."""
     
     user_prompt = f"Transcricao da reuniao:\n\n{transcript}\n\nGere a ATA completa:"
     
-    response = openai.ChatCompletion.create(
-        engine=deployment_name,
+    response = client.chat.completions.create(
+        model=deployment_name,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
