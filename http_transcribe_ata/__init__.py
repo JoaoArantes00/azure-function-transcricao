@@ -11,7 +11,7 @@ from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
 
-MARKER = "PRODUCTION_VERSION_V5_WITH_LOGGING"
+MARKER = "PRODUCTION_VERSION_V6_SIMPLIFIED"
 
 def _cors_headers():
     return {
@@ -120,109 +120,51 @@ def _transcribe_audio(audio_bytes, language="pt-BR"):
     
     results = []
     done = False
-    error_occurred = False
-    error_details = None
     
     def recognized_cb(evt):
         if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            text_preview = evt.result.text[:100] if evt.result.text else "(vazio)"
-            logging.info(f"Reconhecido: {text_preview}...")
             results.append(evt.result)
-    
-    def canceled_cb(evt):
-        nonlocal error_occurred, error_details
-        logging.error(f"Reconhecimento cancelado: Reason={evt.result.reason}")
-        if evt.result.reason == speechsdk.ResultReason.Canceled:
-            cancellation = evt.result.cancellation_details
-            logging.error(f"Detalhes do cancelamento: {cancellation.reason}")
-            if cancellation.reason == speechsdk.CancellationReason.Error:
-                logging.error(f"Codigo de erro: {cancellation.error_code}")
-                logging.error(f"Mensagem de erro: {cancellation.error_details}")
-                error_details = cancellation.error_details
-        error_occurred = True
-    
-    def session_started_cb(evt):
-        logging.info("Sessao de reconhecimento iniciada")
+            logging.info(f"Reconhecido: {evt.result.text[:50]}...")
     
     def session_stopped_cb(evt):
         nonlocal done
-        logging.info("Sessao de reconhecimento finalizada")
         done = True
     
-    recognizer.session_started.connect(session_started_cb)
     recognizer.recognized.connect(recognized_cb)
     recognizer.session_stopped.connect(session_stopped_cb)
-    recognizer.canceled.connect(canceled_cb)
     recognizer.canceled.connect(session_stopped_cb)
     
     recognizer.start_continuous_recognition()
-    logging.info("Reconhecimento continuo iniciado")
     
     chunk_size = 32000
-    total_chunks = (len(audio_bytes) + chunk_size - 1) // chunk_size
-    logging.info(f"Enviando {total_chunks} chunks de audio")
-    
     for i in range(0, len(audio_bytes), chunk_size):
-        chunk_num = i // chunk_size + 1
-        if chunk_num % 100 == 0 or chunk_num == 1 or chunk_num == total_chunks:
-            logging.info(f"Enviando chunk {chunk_num}/{total_chunks}")
         push_stream.write(audio_bytes[i:i+chunk_size])
-    
     push_stream.close()
-    logging.info("Stream de audio fechado, aguardando processamento...")
     
     import time
     timeout = 600
     start = time.time()
-    last_log = start
-    
     while not done and (time.time() - start) < timeout:
-        time.sleep(0.5)
-        elapsed = time.time() - start
-        if elapsed - (last_log - start) >= 30:
-            logging.info(f"Aguardando... ({int(elapsed)}s elapsed, {len(results)} resultados ate agora)")
-            last_log = time.time()
-    
-    if not done:
-        logging.warning(f"Timeout apos {timeout}s")
+        time.sleep(0.1)
     
     recognizer.stop_continuous_recognition()
     
-    elapsed_total = time.time() - start
-    logging.info(f"Reconhecimento finalizado em {elapsed_total:.1f}s")
-    logging.info(f"Total de resultados reconhecidos: {len(results)}")
-    
-    if error_occurred:
-        error_msg = f"Erro durante reconhecimento de fala: {error_details or 'Erro desconhecido'}"
-        logging.error(error_msg)
-        raise RuntimeError(error_msg)
-    
-    if len(results) == 0:
-        logging.warning("Nenhum resultado de reconhecimento foi gerado")
-        return {
-            "text": "",
-            "parts": []
-        }
+    logging.info(f"Transcricao finalizada. Total de resultados: {len(results)}")
     
     transcript_parts = []
-    
     for result in results:
         try:
             import json as json_lib
             detailed = json_lib.loads(result.json)
-            
             if "NBest" in detailed and len(detailed["NBest"]) > 0:
                 best = detailed["NBest"][0]
                 text = best.get("Display", result.text)
                 offset_ticks = result.offset
                 duration_ticks = result.duration
-                
                 offset_seconds = offset_ticks / 10000000
                 duration_seconds = duration_ticks / 10000000
-                
                 timestamp_start = _format_timestamp(offset_seconds)
                 timestamp_end = _format_timestamp(offset_seconds + duration_seconds)
-                
                 transcript_parts.append({
                     "text": text,
                     "start": timestamp_start,
@@ -231,9 +173,8 @@ def _transcribe_audio(audio_bytes, language="pt-BR"):
                     "end_seconds": offset_seconds + duration_seconds
                 })
         except:
-            text = result.text
             transcript_parts.append({
-                "text": text,
+                "text": result.text,
                 "start": "00:00",
                 "end": "00:00"
             })
@@ -241,10 +182,7 @@ def _transcribe_audio(audio_bytes, language="pt-BR"):
     full_text = " ".join([p["text"] for p in transcript_parts])
     logging.info(f"Transcricao completa: {len(full_text)} caracteres")
     
-    return {
-        "text": full_text,
-        "parts": transcript_parts
-    }
+    return {"text": full_text, "parts": transcript_parts}
 
 def _generate_ata(transcript):
     ok, msg = _require_env(["AZURE_OPENAI_KEY", "AZURE_OPENAI_ENDPOINT"])
