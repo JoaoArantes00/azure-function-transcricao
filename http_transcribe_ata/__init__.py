@@ -6,12 +6,11 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import requests
-import time
 from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
 
-MARKER = "BATCH_TRANSCRIPTION_V1"
+MARKER = "BATCH_TRANSCRIPTION_V1_FIXED"
 
 def _cors_headers():
     return {
@@ -102,10 +101,8 @@ def _create_batch_transcription(audio_blob_url, language="pt-BR"):
     speech_key = os.getenv("SPEECH_KEY")
     speech_region = os.getenv("SPEECH_REGION")
     
-    # URL da API de Batch Transcription
     api_url = f"https://{speech_region}.api.cognitive.microsoft.com/speechtotext/v3.1/transcriptions"
     
-    # Configura o job
     transcription_config = {
         "contentUrls": [audio_blob_url],
         "locale": language,
@@ -183,7 +180,6 @@ def _get_transcription_result(transcription_id):
     speech_key = os.getenv("SPEECH_KEY")
     speech_region = os.getenv("SPEECH_REGION")
     
-    # Primeiro pega os arquivos
     files_url = f"https://{speech_region}.api.cognitive.microsoft.com/speechtotext/v3.1/transcriptions/{transcription_id}/files"
     
     headers = {
@@ -197,7 +193,6 @@ def _get_transcription_result(transcription_id):
     
     files = response.json().get("values", [])
     
-    # Procura o arquivo de transcricao
     transcription_file = None
     for file in files:
         if file.get("kind") == "Transcription":
@@ -207,7 +202,6 @@ def _get_transcription_result(transcription_id):
     if not transcription_file:
         raise RuntimeError("Arquivo de transcricao nao encontrado")
     
-    # Baixa o conteudo da transcricao
     content_url = transcription_file.get("links", {}).get("contentUrl")
     if not content_url:
         raise RuntimeError("URL do conteudo nao encontrada")
@@ -219,22 +213,39 @@ def _get_transcription_result(transcription_id):
     
     transcription_data = content_response.json()
     
-    # Extrai o texto
     combined_phrases = transcription_data.get("combinedRecognizedPhrases", [])
     if not combined_phrases:
         return {"text": "", "parts": []}
     
     full_text = combined_phrases[0].get("display", "")
     
-    # Extrai partes detalhadas
     recognized_phrases = transcription_data.get("recognizedPhrases", [])
     parts = []
     
     for phrase in recognized_phrases:
         best = phrase.get("nBest", [{}])[0]
         text = best.get("display", "")
-        offset_seconds = phrase.get("offset", 0) / 10000000
-        duration_seconds = phrase.get("duration", 0) / 10000000
+        
+        # CORRECAO: Converte para int/float antes de dividir
+        offset_raw = phrase.get("offset", 0)
+        duration_raw = phrase.get("duration", 0)
+        
+        try:
+            # Trata tanto string quanto int/float
+            if isinstance(offset_raw, str):
+                offset_seconds = int(offset_raw) / 10000000
+            else:
+                offset_seconds = float(offset_raw) / 10000000 if offset_raw else 0
+            
+            if isinstance(duration_raw, str):
+                duration_seconds = int(duration_raw) / 10000000
+            else:
+                duration_seconds = float(duration_raw) / 10000000 if duration_raw else 0
+                
+        except (ValueError, TypeError) as e:
+            logging.warning(f"Erro ao converter offset/duration: {offset_raw}, {duration_raw} - {e}")
+            offset_seconds = 0
+            duration_seconds = 0
         
         parts.append({
             "text": text,
