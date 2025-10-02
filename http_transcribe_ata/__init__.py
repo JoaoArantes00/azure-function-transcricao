@@ -6,15 +6,12 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import requests
-import azure.cognitiveservices.speech as speechsdk
+import time
 from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
-import tempfile
-import struct
-import io
 
-MARKER = "PRODUCTION_VERSION_V10_NO_FFMPEG"
+MARKER = "BATCH_TRANSCRIPTION_V1"
 
 def _cors_headers():
     return {
@@ -96,189 +93,161 @@ def _require_env(keys):
     msg = f"Variaveis nao configuradas: {', '.join(missing)}" if missing else ""
     return (ok, msg)
 
-def _format_timestamp(seconds):
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{minutes:02d}:{secs:02d}"
-
-def _validate_wav_format(audio_bytes):
-    """
-    Valida se o audio e um WAV valido e retorna informacoes do formato
-    """
-    if len(audio_bytes) < 44:
-        return False, "Arquivo muito pequeno para ser um WAV valido"
-    
-    # Verifica header RIFF
-    if audio_bytes[:4] != b'RIFF':
-        return False, "Nao e um arquivo WAV (falta header RIFF)"
-    
-    # Verifica WAVE
-    if audio_bytes[8:12] != b'WAVE':
-        return False, "Nao e um arquivo WAV (falta marker WAVE)"
-    
-    try:
-        # Le informacoes do formato
-        fmt_pos = audio_bytes.find(b'fmt ')
-        if fmt_pos == -1:
-            return False, "Chunk 'fmt' nao encontrado"
-        
-        # Le dados do formato (offset do fmt + 8 bytes)
-        fmt_data_start = fmt_pos + 8
-        
-        # AudioFormat (2 bytes) - 1 = PCM
-        audio_format = struct.unpack('<H', audio_bytes[fmt_data_start:fmt_data_start+2])[0]
-        
-        # NumChannels (2 bytes)
-        num_channels = struct.unpack('<H', audio_bytes[fmt_data_start+2:fmt_data_start+4])[0]
-        
-        # SampleRate (4 bytes)
-        sample_rate = struct.unpack('<I', audio_bytes[fmt_data_start+4:fmt_data_start+8])[0]
-        
-        # BitsPerSample (2 bytes) - offset 14 do fmt data
-        bits_per_sample = struct.unpack('<H', audio_bytes[fmt_data_start+14:fmt_data_start+16])[0]
-        
-        info = {
-            'format': 'PCM' if audio_format == 1 else f'Unknown ({audio_format})',
-            'channels': num_channels,
-            'sample_rate': sample_rate,
-            'bits_per_sample': bits_per_sample,
-            'is_pcm': audio_format == 1
-        }
-        
-        logging.info(f"WAV validado: {info}")
-        
-        # Verifica se e um formato aceitavel
-        if not info['is_pcm']:
-            return False, f"Formato WAV nao suportado: {info['format']} (apenas PCM e aceito)"
-        
-        if info['bits_per_sample'] not in [16, 32]:
-            return False, f"Bits por amostra nao suportado: {info['bits_per_sample']} (apenas 16 ou 32 bits)"
-        
-        return True, info
-        
-    except Exception as e:
-        logging.error(f"Erro ao validar WAV: {e}")
-        return False, f"Erro ao analisar header WAV: {str(e)}"
-
-def _transcribe_audio(audio_bytes, content_type=None, language="pt-BR"):
+def _create_batch_transcription(audio_blob_url, language="pt-BR"):
+    """Cria um batch transcription job no Azure Speech Service"""
     ok, msg = _require_env(["SPEECH_KEY", "SPEECH_REGION"])
     if not ok:
         raise RuntimeError(msg)
     
-    audio_size_mb = len(audio_bytes) / (1024 * 1024)
-    logging.info(f"=== TRANSCRICAO INICIADA ===")
-    logging.info(f"Tamanho: {len(audio_bytes)} bytes ({audio_size_mb:.2f} MB)")
-    logging.info(f"Content-Type: {content_type}")
-    logging.info(f"Primeiros 20 bytes (hex): {audio_bytes[:20].hex()}")
+    speech_key = os.getenv("SPEECH_KEY")
+    speech_region = os.getenv("SPEECH_REGION")
     
-    # Valida se e WAV
-    is_valid, result = _validate_wav_format(audio_bytes)
+    # URL da API de Batch Transcription
+    api_url = f"https://{speech_region}.api.cognitive.microsoft.com/speechtotext/v3.1/transcriptions"
     
-    if not is_valid:
-        error_msg = f"Formato de audio invalido: {result}"
-        logging.error(error_msg)
-        logging.error("IMPORTANTE: O frontend deve converter o audio para WAV PCM antes de enviar")
-        raise RuntimeError(error_msg)
+    # Configura o job
+    transcription_config = {
+        "contentUrls": [audio_blob_url],
+        "locale": language,
+        "displayName": f"ATA_Transcription_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+        "properties": {
+            "diarizationEnabled": False,
+            "wordLevelTimestampsEnabled": True,
+            "punctuationMode": "DictatedAndAutomatic",
+            "profanityFilterMode": "None"
+        }
+    }
     
-    wav_info = result
-    logging.info(f"Audio WAV validado com sucesso: {wav_info}")
+    headers = {
+        "Ocp-Apim-Subscription-Key": speech_key,
+        "Content-Type": "application/json"
+    }
+    
+    logging.info(f"Criando batch transcription job...")
+    response = requests.post(api_url, json=transcription_config, headers=headers)
+    
+    if response.status_code not in [200, 201]:
+        logging.error(f"Erro ao criar batch transcription: {response.status_code} - {response.text}")
+        raise RuntimeError(f"Falha ao criar transcription job: {response.text}")
+    
+    result = response.json()
+    transcription_id = result["self"].split("/")[-1]
+    
+    logging.info(f"Batch transcription criado: {transcription_id}")
+    return {
+        "transcription_id": transcription_id,
+        "status_url": result["self"],
+        "status": result.get("status", "NotStarted")
+    }
+
+def _get_transcription_status(transcription_id):
+    """Verifica o status de um batch transcription job"""
+    ok, msg = _require_env(["SPEECH_KEY", "SPEECH_REGION"])
+    if not ok:
+        raise RuntimeError(msg)
     
     speech_key = os.getenv("SPEECH_KEY")
     speech_region = os.getenv("SPEECH_REGION")
     
-    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=speech_region)
-    speech_config.speech_recognition_language = language
-    speech_config.output_format = speechsdk.OutputFormat.Detailed
+    api_url = f"https://{speech_region}.api.cognitive.microsoft.com/speechtotext/v3.1/transcriptions/{transcription_id}"
     
-    # Salva WAV em arquivo temporario
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-        tmp_file.write(audio_bytes)
-        tmp_path = tmp_file.name
+    headers = {
+        "Ocp-Apim-Subscription-Key": speech_key
+    }
     
-    logging.info(f"Arquivo temporario WAV criado: {tmp_path}")
+    response = requests.get(api_url, headers=headers)
     
-    try:
-        audio_config = speechsdk.audio.AudioConfig(filename=tmp_path)
-        recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-        
-        results = []
-        done = False
-        error_details = None
-        
-        def recognized_cb(evt):
-            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                results.append(evt.result)
-                logging.info(f"Reconhecido: {evt.result.text[:100]}...")
-        
-        def canceled_cb(evt):
-            nonlocal error_details
-            if evt.reason == speechsdk.CancellationReason.Error:
-                error_details = f"ErrorCode: {evt.error_code}, ErrorDetails: {evt.error_details}"
-                logging.error(f"Cancelado: {error_details}")
-        
-        def session_stopped_cb(evt):
-            nonlocal done
-            done = True
-            logging.info("Sessao finalizada")
-        
-        recognizer.recognized.connect(recognized_cb)
-        recognizer.canceled.connect(canceled_cb)
-        recognizer.session_stopped.connect(session_stopped_cb)
-        
-        logging.info("Iniciando reconhecimento continuo...")
-        recognizer.start_continuous_recognition()
-        
-        import time
-        timeout = 600
-        start = time.time()
-        while not done and (time.time() - start) < timeout:
-            time.sleep(0.1)
-        
-        recognizer.stop_continuous_recognition()
-        
-        if error_details:
-            raise RuntimeError(f"Erro no Speech SDK: {error_details}")
-        
-        if len(results) == 0:
-            logging.warning("Nenhum resultado de transcricao - audio pode estar vazio ou sem fala")
-            return {"text": "", "parts": []}
-        
-        logging.info(f"Transcricao completa: {len(results)} segmentos")
-        
-        transcript_parts = []
-        for result in results:
-            try:
-                import json as json_lib
-                detailed = json_lib.loads(result.json)
-                if "NBest" in detailed and len(detailed["NBest"]) > 0:
-                    best = detailed["NBest"][0]
-                    text = best.get("Display", result.text)
-                    offset_seconds = result.offset / 10000000
-                    duration_seconds = result.duration / 10000000
-                    transcript_parts.append({
-                        "text": text,
-                        "start": _format_timestamp(offset_seconds),
-                        "end": _format_timestamp(offset_seconds + duration_seconds),
-                        "start_seconds": offset_seconds,
-                        "end_seconds": offset_seconds + duration_seconds
-                    })
-            except:
-                transcript_parts.append({
-                    "text": result.text,
-                    "start": "00:00",
-                    "end": "00:00"
-                })
-        
-        full_text = " ".join([p["text"] for p in transcript_parts])
-        logging.info(f"Texto final: {len(full_text)} caracteres")
-        
-        return {"text": full_text, "parts": transcript_parts, "wav_info": wav_info}
+    if response.status_code != 200:
+        logging.error(f"Erro ao obter status: {response.status_code} - {response.text}")
+        raise RuntimeError(f"Falha ao obter status: {response.text}")
     
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except:
-            pass
+    result = response.json()
+    status = result.get("status", "Unknown")
+    
+    logging.info(f"Status do job {transcription_id}: {status}")
+    
+    return {
+        "transcription_id": transcription_id,
+        "status": status,
+        "created_date": result.get("createdDateTime"),
+        "last_action_date": result.get("lastActionDateTime"),
+        "files_url": result.get("links", {}).get("files") if status == "Succeeded" else None
+    }
+
+def _get_transcription_result(transcription_id):
+    """Busca o resultado de uma transcricao completa"""
+    ok, msg = _require_env(["SPEECH_KEY", "SPEECH_REGION"])
+    if not ok:
+        raise RuntimeError(msg)
+    
+    speech_key = os.getenv("SPEECH_KEY")
+    speech_region = os.getenv("SPEECH_REGION")
+    
+    # Primeiro pega os arquivos
+    files_url = f"https://{speech_region}.api.cognitive.microsoft.com/speechtotext/v3.1/transcriptions/{transcription_id}/files"
+    
+    headers = {
+        "Ocp-Apim-Subscription-Key": speech_key
+    }
+    
+    response = requests.get(files_url, headers=headers)
+    
+    if response.status_code != 200:
+        raise RuntimeError(f"Falha ao obter arquivos: {response.text}")
+    
+    files = response.json().get("values", [])
+    
+    # Procura o arquivo de transcricao
+    transcription_file = None
+    for file in files:
+        if file.get("kind") == "Transcription":
+            transcription_file = file
+            break
+    
+    if not transcription_file:
+        raise RuntimeError("Arquivo de transcricao nao encontrado")
+    
+    # Baixa o conteudo da transcricao
+    content_url = transcription_file.get("links", {}).get("contentUrl")
+    if not content_url:
+        raise RuntimeError("URL do conteudo nao encontrada")
+    
+    content_response = requests.get(content_url)
+    
+    if content_response.status_code != 200:
+        raise RuntimeError(f"Falha ao baixar transcricao: {content_response.text}")
+    
+    transcription_data = content_response.json()
+    
+    # Extrai o texto
+    combined_phrases = transcription_data.get("combinedRecognizedPhrases", [])
+    if not combined_phrases:
+        return {"text": "", "parts": []}
+    
+    full_text = combined_phrases[0].get("display", "")
+    
+    # Extrai partes detalhadas
+    recognized_phrases = transcription_data.get("recognizedPhrases", [])
+    parts = []
+    
+    for phrase in recognized_phrases:
+        best = phrase.get("nBest", [{}])[0]
+        text = best.get("display", "")
+        offset_seconds = phrase.get("offset", 0) / 10000000
+        duration_seconds = phrase.get("duration", 0) / 10000000
+        
+        parts.append({
+            "text": text,
+            "start_seconds": offset_seconds,
+            "end_seconds": offset_seconds + duration_seconds
+        })
+    
+    logging.info(f"Transcricao obtida: {len(full_text)} caracteres, {len(parts)} partes")
+    
+    return {
+        "text": full_text,
+        "parts": parts
+    }
 
 def _generate_ata(transcript):
     ok, msg = _require_env(["AZURE_OPENAI_KEY", "AZURE_OPENAI_ENDPOINT"])
@@ -330,6 +299,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
+        # Endpoint para gerar SAS de upload
         if req.params.get("get_upload_url") == "1":
             filename = req.params.get("filename") or "audio.wav"
             container = os.getenv("STORAGE_CONTAINER_INPUT")
@@ -362,25 +332,121 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=500
                 )
         
+        # Endpoint para verificar status
+        if req.params.get("check_status") == "1":
+            transcription_id = req.params.get("transcription_id")
+            if not transcription_id:
+                return func.HttpResponse(
+                    json.dumps({"ok": False, "error": "transcription_id ausente"}),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=400
+                )
+            
+            try:
+                status_info = _get_transcription_status(transcription_id)
+                return func.HttpResponse(
+                    json.dumps({"ok": True, **status_info, "marker": MARKER}),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=200
+                )
+            except Exception as e:
+                logging.exception("Erro ao verificar status")
+                return func.HttpResponse(
+                    json.dumps({"ok": False, "error": str(e)}),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=500
+                )
+        
+        # Endpoint para buscar resultado
+        if req.params.get("get_result") == "1":
+            transcription_id = req.params.get("transcription_id")
+            if not transcription_id:
+                return func.HttpResponse(
+                    json.dumps({"ok": False, "error": "transcription_id ausente"}),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=400
+                )
+            
+            try:
+                # Busca transcricao
+                transcript_data = _get_transcription_result(transcription_id)
+                transcript_text = transcript_data["text"]
+                
+                if not transcript_text:
+                    return func.HttpResponse(
+                        json.dumps({"ok": False, "error": "Transcricao vazia"}),
+                        mimetype="application/json; charset=utf-8",
+                        headers=_cors_headers(),
+                        status_code=400
+                    )
+                
+                # Salva transcricao
+                container_atas = os.getenv("STORAGE_CONTAINER_ATAS")
+                ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                
+                transcript_blob_name = f"transcripts/{ts}/transcript.txt"
+                transcript_url = _upload_to_storage(container_atas, transcript_blob_name, transcript_text, "text/plain")
+                
+                # Gera ATA
+                logging.info("Gerando ATA...")
+                ata_content = _generate_ata(transcript_text)
+                
+                ata_blob_name = f"atas/{ts}/ata.md"
+                ata_url = _upload_to_storage(container_atas, ata_blob_name, ata_content, "text/markdown")
+                
+                result = {
+                    "ok": True,
+                    "transcript": {
+                        "text": transcript_text,
+                        "url": transcript_url,
+                        "parts": transcript_data.get("parts", [])
+                    },
+                    "ata": {
+                        "content": ata_content,
+                        "url": ata_url
+                    },
+                    "marker": MARKER
+                }
+                
+                return func.HttpResponse(
+                    json.dumps(result),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=200
+                )
+                
+            except Exception as e:
+                logging.exception("Erro ao buscar resultado")
+                return func.HttpResponse(
+                    json.dumps({"ok": False, "error": str(e)}),
+                    mimetype="application/json; charset=utf-8",
+                    headers=_cors_headers(),
+                    status_code=500
+                )
+        
+        # Endpoint principal - Inicia batch transcription
         audio_bytes = None
         blob_url_final = None
         content_type = req.headers.get('Content-Type', 'application/octet-stream')
         
         logging.info(f"Requisicao: Method={req.method}, Content-Type={content_type}")
         
-        # Tenta obter audio de URL (fluxo SAS)
+        # Tenta obter audio de URL
         try:
             body = req.get_json()
             blob_url = body.get("blob_url") or body.get("audio_url")
             if blob_url:
-                logging.info(f"Download de: {blob_url}")
-                audio_bytes = _download_to_bytes(blob_url)
+                logging.info(f"Usando audio de: {blob_url}")
                 blob_url_final = blob_url
         except:
             pass
         
         # Se nao tem audio, pega do body
-        if audio_bytes is None:
+        if blob_url_final is None:
             audio_bytes = req.get_body()
             if not audio_bytes:
                 return func.HttpResponse(
@@ -392,57 +458,24 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             
             logging.info(f"Audio no body: {len(audio_bytes)} bytes")
             
-            # Salva audio original
+            # Salva audio
             container_input = os.getenv("STORAGE_CONTAINER_INPUT")
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-            audio_blob_name = f"audios/{ts}/original.wav"
+            audio_blob_name = f"audios/{ts}/audio.wav"
             
             blob_url_final = _upload_to_storage(container_input, audio_blob_name, audio_bytes, "audio/wav")
             logging.info(f"Audio salvo: {blob_url_final}")
         
-        # Transcreve
-        logging.info("Iniciando transcricao...")
-        transcript_data = _transcribe_audio(audio_bytes, content_type, language="pt-BR")
-        transcript_text = transcript_data["text"]
-        transcript_parts = transcript_data.get("parts", [])
-        wav_info = transcript_data.get("wav_info", {})
-        
-        if not transcript_text:
-            logging.warning("Transcricao vazia")
-            return func.HttpResponse(
-                json.dumps({"ok": False, "error": "Nenhuma fala detectada no audio"}),
-                mimetype="application/json; charset=utf-8",
-                headers=_cors_headers(),
-                status_code=400
-            )
-        
-        # Salva transcript
-        container_atas = os.getenv("STORAGE_CONTAINER_ATAS")
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        
-        transcript_blob_name = f"transcripts/{ts}/transcript.txt"
-        transcript_url = _upload_to_storage(container_atas, transcript_blob_name, transcript_text, "text/plain")
-        
-        # Gera ATA
-        logging.info("Gerando ATA...")
-        ata_content = _generate_ata(transcript_text)
-        
-        ata_blob_name = f"atas/{ts}/ata.md"
-        ata_url = _upload_to_storage(container_atas, ata_blob_name, ata_content, "text/markdown")
+        # Cria batch transcription job
+        logging.info("Iniciando batch transcription...")
+        transcription_info = _create_batch_transcription(blob_url_final, language="pt-BR")
         
         result = {
             "ok": True,
+            "mode": "batch",
+            "transcription_id": transcription_info["transcription_id"],
+            "status": transcription_info["status"],
             "audio_url": blob_url_final,
-            "transcript": {
-                "text": transcript_text,
-                "url": transcript_url,
-                "parts": transcript_parts
-            },
-            "ata": {
-                "content": ata_content,
-                "url": ata_url
-            },
-            "audio_info": wav_info,
             "marker": MARKER
         }
         
