@@ -9,6 +9,7 @@ import requests
 from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
+from isodate import parse_duration
 
 MARKER = "BATCH_TRANSCRIPTION_V1_FIXED"
 
@@ -226,23 +227,28 @@ def _get_transcription_result(transcription_id):
         best = phrase.get("nBest", [{}])[0]
         text = best.get("display", "")
         
-        # CORRECAO: Converte para int/float antes de dividir
         offset_raw = phrase.get("offset", 0)
         duration_raw = phrase.get("duration", 0)
         
         try:
-            # Trata tanto string quanto int/float
+            # Tenta converter usando isodate para formato ISO 8601 Duration
             if isinstance(offset_raw, str):
-                offset_seconds = int(offset_raw) / 10000000
-            else:
+                offset_seconds = parse_duration(offset_raw).total_seconds()
+            elif isinstance(offset_raw, (int, float)):
+                # Se vier como número, assume que está em ticks (10^-7 segundos)
                 offset_seconds = float(offset_raw) / 10000000 if offset_raw else 0
+            else:
+                offset_seconds = 0
             
             if isinstance(duration_raw, str):
-                duration_seconds = int(duration_raw) / 10000000
-            else:
+                duration_seconds = parse_duration(duration_raw).total_seconds()
+            elif isinstance(duration_raw, (int, float)):
+                # Se vier como número, assume que está em ticks (10^-7 segundos)
                 duration_seconds = float(duration_raw) / 10000000 if duration_raw else 0
+            else:
+                duration_seconds = 0
                 
-        except (ValueError, TypeError) as e:
+        except Exception as e:
             logging.warning(f"Erro ao converter offset/duration: {offset_raw}, {duration_raw} - {e}")
             offset_seconds = 0
             duration_seconds = 0
