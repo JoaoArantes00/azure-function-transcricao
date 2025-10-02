@@ -11,9 +11,10 @@ from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings, BlobSasPermissions, generate_blob_sas
 import tempfile
-import subprocess
+import struct
+import io
 
-MARKER = "PRODUCTION_VERSION_V9_FIXED"
+MARKER = "PRODUCTION_VERSION_V10_NO_FFMPEG"
 
 def _cors_headers():
     return {
@@ -100,60 +101,64 @@ def _format_timestamp(seconds):
     secs = int(seconds % 60)
     return f"{minutes:02d}:{secs:02d}"
 
-def _normalize_to_wav_pcm16(audio_bytes):
+def _validate_wav_format(audio_bytes):
     """
-    SEMPRE normaliza o audio para WAV PCM 16kHz mono 16-bit
-    Formato garantido para funcionar com Azure Speech SDK
+    Valida se o audio e um WAV valido e retorna informacoes do formato
     """
-    logging.info(f"Normalizando audio para WAV PCM16: {len(audio_bytes)} bytes")
+    if len(audio_bytes) < 44:
+        return False, "Arquivo muito pequeno para ser um WAV valido"
     
-    input_temp = tempfile.NamedTemporaryFile(suffix='.audio', delete=False)
-    output_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+    # Verifica header RIFF
+    if audio_bytes[:4] != b'RIFF':
+        return False, "Nao e um arquivo WAV (falta header RIFF)"
+    
+    # Verifica WAVE
+    if audio_bytes[8:12] != b'WAVE':
+        return False, "Nao e um arquivo WAV (falta marker WAVE)"
     
     try:
-        input_temp.write(audio_bytes)
-        input_temp.close()
-        output_temp.close()
+        # Le informacoes do formato
+        fmt_pos = audio_bytes.find(b'fmt ')
+        if fmt_pos == -1:
+            return False, "Chunk 'fmt' nao encontrado"
         
-        # Converte SEMPRE para o formato exato que o Speech SDK espera
-        cmd = [
-            'ffmpeg',
-            '-i', input_temp.name,
-            '-acodec', 'pcm_s16le',  # PCM 16-bit little-endian
-            '-ar', '16000',           # 16kHz
-            '-ac', '1',               # Mono
-            '-f', 'wav',              # WAV format
-            '-y',                     # Sobrescrever
-            output_temp.name
-        ]
+        # Le dados do formato (offset do fmt + 8 bytes)
+        fmt_data_start = fmt_pos + 8
         
-        logging.info(f"Executando FFmpeg: {' '.join(cmd)}")
+        # AudioFormat (2 bytes) - 1 = PCM
+        audio_format = struct.unpack('<H', audio_bytes[fmt_data_start:fmt_data_start+2])[0]
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
+        # NumChannels (2 bytes)
+        num_channels = struct.unpack('<H', audio_bytes[fmt_data_start+2:fmt_data_start+4])[0]
         
-        if result.returncode != 0:
-            logging.error(f"FFmpeg stderr: {result.stderr}")
-            raise RuntimeError(f"FFmpeg falhou: {result.stderr}")
+        # SampleRate (4 bytes)
+        sample_rate = struct.unpack('<I', audio_bytes[fmt_data_start+4:fmt_data_start+8])[0]
         
-        with open(output_temp.name, 'rb') as f:
-            wav_bytes = f.read()
+        # BitsPerSample (2 bytes) - offset 14 do fmt data
+        bits_per_sample = struct.unpack('<H', audio_bytes[fmt_data_start+14:fmt_data_start+16])[0]
         
-        logging.info(f"Normalizacao concluida: {len(wav_bytes)} bytes WAV PCM16")
-        logging.info(f"Header WAV (hex): {wav_bytes[:44].hex()}")
+        info = {
+            'format': 'PCM' if audio_format == 1 else f'Unknown ({audio_format})',
+            'channels': num_channels,
+            'sample_rate': sample_rate,
+            'bits_per_sample': bits_per_sample,
+            'is_pcm': audio_format == 1
+        }
         
-        return wav_bytes
+        logging.info(f"WAV validado: {info}")
         
-    finally:
-        try:
-            os.unlink(input_temp.name)
-            os.unlink(output_temp.name)
-        except:
-            pass
+        # Verifica se e um formato aceitavel
+        if not info['is_pcm']:
+            return False, f"Formato WAV nao suportado: {info['format']} (apenas PCM e aceito)"
+        
+        if info['bits_per_sample'] not in [16, 32]:
+            return False, f"Bits por amostra nao suportado: {info['bits_per_sample']} (apenas 16 ou 32 bits)"
+        
+        return True, info
+        
+    except Exception as e:
+        logging.error(f"Erro ao validar WAV: {e}")
+        return False, f"Erro ao analisar header WAV: {str(e)}"
 
 def _transcribe_audio(audio_bytes, content_type=None, language="pt-BR"):
     ok, msg = _require_env(["SPEECH_KEY", "SPEECH_REGION"])
@@ -162,15 +167,21 @@ def _transcribe_audio(audio_bytes, content_type=None, language="pt-BR"):
     
     audio_size_mb = len(audio_bytes) / (1024 * 1024)
     logging.info(f"=== TRANSCRICAO INICIADA ===")
-    logging.info(f"Tamanho original: {len(audio_bytes)} bytes ({audio_size_mb:.2f} MB)")
+    logging.info(f"Tamanho: {len(audio_bytes)} bytes ({audio_size_mb:.2f} MB)")
     logging.info(f"Content-Type: {content_type}")
+    logging.info(f"Primeiros 20 bytes (hex): {audio_bytes[:20].hex()}")
     
-    # SEMPRE normaliza para WAV PCM16 - garante compatibilidade
-    try:
-        audio_bytes = _normalize_to_wav_pcm16(audio_bytes)
-    except Exception as e:
-        logging.error(f"Erro na normalizacao: {e}")
-        raise RuntimeError(f"Falha ao normalizar audio: {str(e)}")
+    # Valida se e WAV
+    is_valid, result = _validate_wav_format(audio_bytes)
+    
+    if not is_valid:
+        error_msg = f"Formato de audio invalido: {result}"
+        logging.error(error_msg)
+        logging.error("IMPORTANTE: O frontend deve converter o audio para WAV PCM antes de enviar")
+        raise RuntimeError(error_msg)
+    
+    wav_info = result
+    logging.info(f"Audio WAV validado com sucesso: {wav_info}")
     
     speech_key = os.getenv("SPEECH_KEY")
     speech_region = os.getenv("SPEECH_REGION")
@@ -179,12 +190,12 @@ def _transcribe_audio(audio_bytes, content_type=None, language="pt-BR"):
     speech_config.speech_recognition_language = language
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
-    # Salva WAV normalizado em arquivo temporario
+    # Salva WAV em arquivo temporario
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
         tmp_file.write(audio_bytes)
         tmp_path = tmp_file.name
     
-    logging.info(f"Arquivo temporario WAV: {tmp_path}")
+    logging.info(f"Arquivo temporario WAV criado: {tmp_path}")
     
     try:
         audio_config = speechsdk.audio.AudioConfig(filename=tmp_path)
@@ -261,7 +272,7 @@ def _transcribe_audio(audio_bytes, content_type=None, language="pt-BR"):
         full_text = " ".join([p["text"] for p in transcript_parts])
         logging.info(f"Texto final: {len(full_text)} caracteres")
         
-        return {"text": full_text, "parts": transcript_parts}
+        return {"text": full_text, "parts": transcript_parts, "wav_info": wav_info}
     
     finally:
         try:
@@ -384,9 +395,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             # Salva audio original
             container_input = os.getenv("STORAGE_CONTAINER_INPUT")
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-            audio_blob_name = f"audios/{ts}/original.bin"
+            audio_blob_name = f"audios/{ts}/original.wav"
             
-            blob_url_final = _upload_to_storage(container_input, audio_blob_name, audio_bytes, content_type)
+            blob_url_final = _upload_to_storage(container_input, audio_blob_name, audio_bytes, "audio/wav")
             logging.info(f"Audio salvo: {blob_url_final}")
         
         # Transcreve
@@ -394,6 +405,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         transcript_data = _transcribe_audio(audio_bytes, content_type, language="pt-BR")
         transcript_text = transcript_data["text"]
         transcript_parts = transcript_data.get("parts", [])
+        wav_info = transcript_data.get("wav_info", {})
         
         if not transcript_text:
             logging.warning("Transcricao vazia")
@@ -430,6 +442,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 "content": ata_content,
                 "url": ata_url
             },
+            "audio_info": wav_info,
             "marker": MARKER
         }
         
