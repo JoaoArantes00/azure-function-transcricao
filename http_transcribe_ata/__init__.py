@@ -93,6 +93,12 @@ def _require_env(keys):
     msg = f"Variaveis nao configuradas: {', '.join(missing)}" if missing else ""
     return (ok, msg)
 
+def _format_timestamp(seconds):
+    """Converte segundos em formato MM:SS"""
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02d}:{secs:02d}"
+
 def _create_batch_transcription(audio_blob_url, language="pt-BR"):
     """Cria um batch transcription job no Azure Speech Service"""
     ok, msg = _require_env(["SPEECH_KEY", "SPEECH_REGION"])
@@ -216,12 +222,13 @@ def _get_transcription_result(transcription_id):
     
     combined_phrases = transcription_data.get("combinedRecognizedPhrases", [])
     if not combined_phrases:
-        return {"text": "", "parts": []}
+        return {"text": "", "parts": [], "text_with_timestamps": ""}
     
     full_text = combined_phrases[0].get("display", "")
     
     recognized_phrases = transcription_data.get("recognizedPhrases", [])
     parts = []
+    transcript_with_times = []
     
     for phrase in recognized_phrases:
         best = phrase.get("nBest", [{}])[0]
@@ -258,15 +265,24 @@ def _get_transcription_result(transcription_id):
             "start_seconds": offset_seconds,
             "end_seconds": offset_seconds + duration_seconds
         })
+        
+        # Adiciona linha formatada com timestamp
+        timestamp = _format_timestamp(offset_seconds)
+        transcript_with_times.append(f"[{timestamp}] {text}")
+    
+    # Junta tudo em um texto formatado
+    text_with_timestamps = "\n".join(transcript_with_times)
     
     logging.info(f"Transcricao obtida: {len(full_text)} caracteres, {len(parts)} partes")
     
     return {
         "text": full_text,
-        "parts": parts
+        "parts": parts,
+        "text_with_timestamps": text_with_timestamps
     }
 
-def _generate_ata(transcript):
+def _generate_ata(transcript_text, parts):
+    """Gera ATA com informações de tempo quando relevante"""
     ok, msg = _require_env(["AZURE_OPENAI_KEY", "AZURE_OPENAI_ENDPOINT"])
     if not ok:
         raise RuntimeError(msg)
@@ -290,9 +306,29 @@ Analise a transcricao fornecida e crie uma ATA estruturada com:
 - Acoes e responsaveis
 - Proximos passos
 
-Formato em Markdown, profissional e objetivo."""
+Formato em Markdown, profissional e objetivo.
+
+IMPORTANTE: Quando houver decisoes importantes ou acoes especificas, inclua referencias temporais usando o formato [MM:SS] para facilitar a localizacao no audio original."""
     
-    user_prompt = f"Transcricao da reuniao:\n\n{transcript}\n\nGere a ATA completa:"
+    # Cria uma versão resumida com timestamps para decisões importantes
+    # (para não sobrecarregar o prompt)
+    sample_with_times = []
+    for i, part in enumerate(parts[:50]):  # Primeiros 50 segmentos como exemplo
+        timestamp = _format_timestamp(part['start_seconds'])
+        sample_with_times.append(f"[{timestamp}] {part['text']}")
+    
+    sample_text = "\n".join(sample_with_times)
+    
+    user_prompt = f"""Transcricao da reuniao com timestamps de referencia:
+
+{sample_text}
+
+[... restante da transcricao omitido para brevidade ...]
+
+Transcricao completa (texto corrido):
+{transcript_text}
+
+Gere a ATA completa. Quando mencionar decisoes importantes ou acoes, inclua a referencia temporal [MM:SS] para facilitar localizacao no audio."""
     
     response = client.chat.completions.create(
         model=deployment_name,
@@ -392,6 +428,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 # Busca transcricao
                 transcript_data = _get_transcription_result(transcription_id)
                 transcript_text = transcript_data["text"]
+                transcript_with_timestamps = transcript_data["text_with_timestamps"]
                 
                 if not transcript_text:
                     return func.HttpResponse(
@@ -405,12 +442,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 container_atas = os.getenv("STORAGE_CONTAINER_ATAS")
                 ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
                 
+                # Salva versão SEM timestamps (texto corrido)
                 transcript_blob_name = f"transcripts/{ts}/transcript.txt"
                 transcript_url = _upload_to_storage(container_atas, transcript_blob_name, transcript_text, "text/plain")
                 
+                # Salva versão COM timestamps
+                transcript_timed_blob_name = f"transcripts/{ts}/transcript_timestamped.txt"
+                transcript_timed_url = _upload_to_storage(container_atas, transcript_timed_blob_name, transcript_with_timestamps, "text/plain")
+                
                 # Gera ATA
                 logging.info("Gerando ATA...")
-                ata_content = _generate_ata(transcript_text)
+                ata_content = _generate_ata(transcript_text, transcript_data.get("parts", []))
                 
                 ata_blob_name = f"atas/{ts}/ata.md"
                 ata_url = _upload_to_storage(container_atas, ata_blob_name, ata_content, "text/markdown")
@@ -419,7 +461,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     "ok": True,
                     "transcript": {
                         "text": transcript_text,
+                        "text_with_timestamps": transcript_with_timestamps,
                         "url": transcript_url,
+                        "url_timestamped": transcript_timed_url,
                         "parts": transcript_data.get("parts", [])
                     },
                     "ata": {
